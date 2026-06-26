@@ -3,9 +3,10 @@
 @tailwind utilities;
 
 :root {
-  /* Monospace, provider-grade aesthetic */
-  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
-    "Roboto Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Clean proportional sans; numbers opt into tabular figures via .tnum */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
 html,
@@ -15,22 +16,75 @@ body {
 }
 
 body {
-  font-family: var(--font-mono);
-  background-color: #f3eee3;
-  color: #27221a;
+  font-family: var(--font-sans);
+  background-color: #f4f2ec;
+  color: #26241f;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: "tnum" 1;
+  text-rendering: optimizeLegibility;
 }
 
 * {
   box-sizing: border-box;
 }
 
-/* Tiny uppercase tracked labels used throughout the dashboard chrome. */
-.label-micro {
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 10px;
+/* ─────────────── Design-system component classes ───────────────
+   Mirrors the host design system (.btn, .card, .stat-label, .tnum,
+   .badge-sage, .input …) so markup is portable and a production
+   stylesheet can be swapped in without touching components. */
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-200 bg-panel shadow-card;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+
+  .stat-label,
+  .label-micro {
+    @apply text-[11px] font-medium uppercase tracking-wide text-ink-400;
+  }
+  .stat-value {
+    @apply text-2xl font-semibold text-ink-900;
+    font-variant-numeric: tabular-nums;
+  }
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-secondary {
+    @apply border border-ink-200 bg-panel text-ink-700 hover:bg-ink-100/70;
+  }
+  .btn-ghost {
+    @apply text-ink-600 hover:bg-ink-100/70;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset;
+  }
+  .badge-sage {
+    @apply bg-brand-100 text-brand-700 ring-brand-600/20;
+  }
+  .badge-rust {
+    @apply bg-rust-50 text-rust-600 ring-rust-500/25;
+  }
+  .badge-amber {
+    @apply bg-ochre-50 text-ochre-600 ring-ochre-500/25;
+  }
+  .badge-neutral {
+    @apply bg-ink-100 text-ink-600 ring-ink-400/25;
+  }
+
+  .input,
+  .select {
+    @apply w-full rounded-lg border border-ink-200 bg-panel px-3 py-2 text-sm text-ink-800 outline-none transition-colors placeholder:text-ink-400 focus:border-brand-400;
+  }
 }
 
 .scrollbar-thin::-webkit-scrollbar {
@@ -38,7 +92,7 @@ body {
   height: 8px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background-color: #ddd4c0;
+  background-color: #ddd9cd;
   border-radius: 9999px;
 }
 .scrollbar-thin::-webkit-scrollbar-track {

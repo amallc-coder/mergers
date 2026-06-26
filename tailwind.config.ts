@@ -1,9 +1,8 @@
 import type { Config } from "tailwindcss";
 
-// "Clinilytics" provider-grade aesthetic: warm cream canvas, muted earth tones,
-// dark-green primary, rust accents, monospace everything. The `brand` (green)
-// and `ink` (warm taupe) ramps are consumed throughout the component library,
-// so remapping them here re-skins the whole app.
+// Provider-grade aesthetic: light warm canvas, near-white cards, muted sage
+// green primary, rust/ochre accents. Base font is a clean sans; numbers use
+// tabular figures (.tnum / tabular-nums).
 const config: Config = {
   content: [
     "./src/app/**/*.{ts,tsx}",
@@ -13,38 +12,37 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Canvas + surfaces
-        canvas: "#f3eee3",
-        panel: "#fbf9f3",
-        // Primary — dark olive green
+        canvas: "#f4f2ec",
+        panel: "#fcfbf8",
+        // Primary — muted sage green
         brand: {
-          50: "#eef2ea",
-          100: "#dde5d3",
-          200: "#c3d0b4",
-          300: "#a1b48b",
-          400: "#809566",
-          500: "#647a4c",
-          600: "#4d6139",
-          700: "#3e4f30",
-          800: "#333f29",
-          900: "#2b3524",
-          950: "#161c11",
+          50: "#eef3ea",
+          100: "#dde8d3",
+          200: "#c2d4b3",
+          300: "#a0bb8b",
+          400: "#7d9e64",
+          500: "#62854a",
+          600: "#4f6c3b",
+          700: "#405730",
+          800: "#354528",
+          900: "#2c3a23",
+          950: "#16200f",
         },
-        // Neutrals — warm taupe/stone
+        // Neutrals — soft warm gray
         ink: {
-          50: "#f6f3ec",
-          100: "#ece6d8",
-          200: "#ddd4c0",
-          300: "#c5b99f",
-          400: "#9c9079",
-          500: "#7b7160",
-          600: "#615949",
-          700: "#4d4639",
-          800: "#39342a",
-          900: "#27221a",
-          950: "#17140d",
+          50: "#f6f5f0",
+          100: "#eeece4",
+          200: "#e1ddd0",
+          300: "#c8c3b4",
+          400: "#9c978a",
+          500: "#7a766b",
+          600: "#5f5c52",
+          700: "#4b4841",
+          800: "#383631",
+          900: "#262420",
+          950: "#161512",
         },
-        // Rust / terracotta accent (warnings, A/R, negatives)
+        // Rust / terracotta accent
         rust: {
           50: "#f7e9e2",
           100: "#efd2c5",
@@ -57,7 +55,7 @@ const config: Config = {
           800: "#5a271a",
           900: "#3f1d14",
         },
-        // Ochre / amber accent (pending, caution)
+        // Ochre / amber accent
         ochre: {
           50: "#f7efd9",
           100: "#eddfb4",
@@ -69,12 +67,12 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ["var(--font-mono)", "ui-monospace", "monospace"],
+        sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
         mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
       boxShadow: {
-        card: "0 1px 2px rgba(39,34,26,0.04)",
-        pop: "0 8px 24px rgba(39,34,26,0.12)",
+        card: "0 1px 2px rgba(38,36,31,0.04), 0 1px 3px rgba(38,36,31,0.03)",
+        pop: "0 8px 24px rgba(38,36,31,0.12)",
       },
       borderRadius: {
         xl: "0.625rem",

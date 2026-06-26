@@ -34,9 +34,7 @@ export function Card({
   as?: "div" | "section" | "article";
 }) {
   return (
-    <Tag className={cn("rounded-xl border border-ink-200 bg-panel shadow-card", className)}>
-      {children}
-    </Tag>
+    <Tag className={cn("card", className)}>{children}</Tag>
   );
 }
 
@@ -68,16 +66,7 @@ export function CardHeader({
 // ─────────────────────────── Badges & chips ───────────────────────────
 
 export function Badge({ children, className }: { children: React.ReactNode; className?: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ring-1 ring-inset",
-        className,
-      )}
-    >
-      {children}
-    </span>
-  );
+  return <span className={cn("badge", className)}>{children}</span>;
 }
 
 export function StatusChip({ status }: { status: DiligenceStatus }) {
@@ -149,9 +138,9 @@ export function StatCard({
   tone?: Tone;
 }) {
   return (
-    <div className="rounded-xl border border-ink-200 bg-panel px-4 py-3 shadow-card">
-      <p className="label-micro font-medium text-ink-400">{label}</p>
-      <p className={cn("mt-1 text-2xl font-semibold tabular-nums", TONE_TEXT[tone])}>{value}</p>
+    <div className="card px-4 py-3">
+      <p className="stat-label">{label}</p>
+      <p className={cn("mt-1 stat-value", TONE_TEXT[tone])}>{value}</p>
       {sub ? <p className="mt-0.5 text-xs text-ink-500">{sub}</p> : null}
     </div>
   );
@@ -285,15 +274,7 @@ export function LinkButton({
   variant?: "primary" | "secondary";
 }) {
   return (
-    <Link
-      href={href}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
-        variant === "primary"
-          ? "bg-brand-700 text-canvas hover:bg-brand-800"
-          : "border border-ink-200 bg-panel text-ink-700 hover:bg-ink-100/50",
-      )}
-    >
+    <Link href={href} className={cn("btn", variant === "primary" ? "btn-primary" : "btn-secondary")}>
       {children}
     </Link>
   );

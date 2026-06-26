@@ -48,7 +48,7 @@ export function LoginScreen() {
                   setError(null);
                 }}
                 placeholder="npatel@amadministrators.com"
-                className="w-full rounded-lg border border-ink-200 bg-canvas px-3 py-2 text-sm outline-none focus:border-brand-400"
+                className="input"
                 required
               />
             </Field>
@@ -58,14 +58,11 @@ export function LoginScreen() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
-                className="w-full rounded-lg border border-ink-200 bg-canvas px-3 py-2 text-sm outline-none focus:border-brand-400"
+                className="input"
               />
             </Field>
             {error ? <p className="text-xs font-medium text-rust-600">{error}</p> : null}
-            <button
-              type="submit"
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-700 px-3 py-2 text-sm font-medium text-canvas hover:bg-brand-800"
-            >
+            <button type="submit" className="btn btn-primary w-full">
               <LogIn size={15} /> Sign in
             </button>
           </form>
