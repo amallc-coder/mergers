@@ -4,6 +4,14 @@ import { getRepository } from "@/lib/data/repository";
 import { isOverdue } from "@/lib/domain/analytics";
 import { NOW } from "@/lib/data/seed";
 
+export const dynamicParams = false;
+
+export async function generateStaticParams() {
+  const repo = getRepository();
+  const sellers = await repo.sellerPortalUsers();
+  return sellers.map((s) => ({ token: s.accessToken }));
+}
+
 export default async function SellerPortalPage({ params }: { params: { token: string } }) {
   const repo = getRepository();
   const seller = await repo.sellerByToken(params.token);

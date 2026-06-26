@@ -22,6 +22,14 @@ import { getRepository } from "@/lib/data/repository";
 import { getTransactionView } from "@/lib/selectors";
 import { NOW } from "@/lib/data/seed";
 
+export const dynamicParams = false;
+
+export async function generateStaticParams() {
+  const repo = getRepository();
+  const transactions = await repo.transactions();
+  return transactions.map((t) => ({ id: t.id }));
+}
+
 export default async function TransactionDetailPage({ params }: { params: { id: string } }) {
   const view = await getTransactionView(params.id);
   if (!view) notFound();
