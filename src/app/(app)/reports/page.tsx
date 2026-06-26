@@ -41,7 +41,7 @@ export default function ReportsPage() {
                   return (
                     <button
                       key={f.label}
-                      className="inline-flex items-center gap-1 rounded-lg border border-ink-200 bg-white px-2.5 py-1 text-xs font-medium text-ink-600 hover:bg-ink-50"
+                      className="inline-flex items-center gap-1 rounded-lg border border-ink-200 bg-panel px-2.5 py-1 text-xs font-medium text-ink-600 hover:bg-ink-50"
                     >
                       <Icon size={13} /> {f.label}
                     </button>

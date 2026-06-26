@@ -97,7 +97,7 @@ export default async function TransactionDetailPage({ params }: { params: { id: 
       </Link>
 
       {/* Header */}
-      <div className="mb-6 rounded-xl border border-ink-200 bg-white p-5 shadow-card">
+      <div className="mb-6 rounded-xl border border-ink-200 bg-panel p-5 shadow-card">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
@@ -114,7 +114,7 @@ export default async function TransactionDetailPage({ params }: { params: { id: 
             {sellerLink ? (
               <Link
                 href={`/portal/${sellerLink.accessToken}`}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-700 hover:bg-ink-50"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-panel px-3 py-1.5 text-sm font-medium text-ink-700 hover:bg-ink-50"
               >
                 <Share2 size={15} /> Seller portal
               </Link>
@@ -124,7 +124,7 @@ export default async function TransactionDetailPage({ params }: { params: { id: 
                 href={tx.sharePointFolderUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-700 hover:bg-ink-50"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 bg-panel px-3 py-1.5 text-sm font-medium text-ink-700 hover:bg-ink-50"
               >
                 <ExternalLink size={15} /> SharePoint
               </a>

@@ -14,6 +14,14 @@ import type {
   RiskLevel,
 } from "@/lib/domain/types";
 
+const TONE_TEXT = {
+  default: "text-ink-900",
+  good: "text-brand-600",
+  warn: "text-ochre-600",
+  bad: "text-rust-600",
+} as const;
+type Tone = keyof typeof TONE_TEXT;
+
 // ─────────────────────────── Card ───────────────────────────
 
 export function Card({
@@ -26,7 +34,7 @@ export function Card({
   as?: "div" | "section" | "article";
 }) {
   return (
-    <Tag className={cn("rounded-xl border border-ink-200 bg-white shadow-card", className)}>
+    <Tag className={cn("rounded-xl border border-ink-200 bg-panel shadow-card", className)}>
       {children}
     </Tag>
   );
@@ -44,11 +52,11 @@ export function CardHeader({
   icon?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-ink-100 px-5 py-4">
-      <div className="flex items-start gap-3">
+    <div className="flex items-start justify-between gap-4 border-b border-ink-200/70 px-5 py-3.5">
+      <div className="flex items-start gap-2.5">
         {icon ? <div className="mt-0.5 text-ink-400">{icon}</div> : null}
         <div>
-          <h3 className="text-sm font-semibold text-ink-900">{title}</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-ink-800">{title}</h3>
           {subtitle ? <p className="mt-0.5 text-xs text-ink-500">{subtitle}</p> : null}
         </div>
       </div>
@@ -59,17 +67,11 @@ export function CardHeader({
 
 // ─────────────────────────── Badges & chips ───────────────────────────
 
-export function Badge({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+export function Badge({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ring-1 ring-inset",
         className,
       )}
     >
@@ -100,8 +102,8 @@ export function TimelineBadge({ timeline }: { timeline: "Pre Signing" | "Post Si
     <Badge
       className={
         timeline === "Pre Signing"
-          ? "bg-brand-50 text-brand-700 ring-brand-600/20"
-          : "bg-ink-100 text-ink-600 ring-ink-500/20"
+          ? "bg-brand-100 text-brand-700 ring-brand-600/20"
+          : "bg-ink-100 text-ink-600 ring-ink-400/25"
       }
     >
       {timeline}
@@ -123,16 +125,11 @@ export function ProgressBar({
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
   return (
     <div className={cn("flex items-center gap-2", className)}>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-ink-100">
-        <div
-          className={cn("h-full rounded-full transition-all", progressColor(clamped))}
-          style={{ width: `${clamped}%` }}
-        />
+      <div className="h-2 flex-1 overflow-hidden rounded-sm bg-ink-200/60">
+        <div className={cn("h-full transition-all", progressColor(clamped))} style={{ width: `${clamped}%` }} />
       </div>
       {showLabel ? (
-        <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums text-ink-600">
-          {clamped}%
-        </span>
+        <span className="w-9 shrink-0 text-right text-xs font-medium tabular-nums text-ink-600">{clamped}%</span>
       ) : null}
     </div>
   );
@@ -149,22 +146,14 @@ export function StatCard({
   label: string;
   value: React.ReactNode;
   sub?: React.ReactNode;
-  tone?: "default" | "good" | "warn" | "bad";
+  tone?: Tone;
 }) {
-  const toneClass =
-    tone === "good"
-      ? "text-emerald-600"
-      : tone === "warn"
-        ? "text-amber-600"
-        : tone === "bad"
-          ? "text-rose-600"
-          : "text-ink-900";
   return (
-    <Card className="px-4 py-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-ink-400">{label}</p>
-      <p className={cn("mt-1 text-2xl font-semibold tabular-nums", toneClass)}>{value}</p>
+    <div className="rounded-xl border border-ink-200 bg-panel px-4 py-3 shadow-card">
+      <p className="label-micro font-medium text-ink-400">{label}</p>
+      <p className={cn("mt-1 text-2xl font-semibold tabular-nums", TONE_TEXT[tone])}>{value}</p>
       {sub ? <p className="mt-0.5 text-xs text-ink-500">{sub}</p> : null}
-    </Card>
+    </div>
   );
 }
 
@@ -182,7 +171,7 @@ export function KpiCard({
   needsReview?: boolean;
 }) {
   return (
-    <div className="rounded-lg border border-ink-200 bg-white px-3 py-2.5">
+    <div className="rounded-lg border border-ink-200 bg-panel px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-medium text-ink-500">{label}</p>
         {confidence !== undefined ? (
@@ -190,10 +179,10 @@ export function KpiCard({
             className={cn(
               "rounded px-1 text-[10px] font-semibold tabular-nums",
               confidence >= 0.85
-                ? "bg-emerald-50 text-emerald-600"
+                ? "bg-brand-100 text-brand-700"
                 : confidence >= 0.7
-                  ? "bg-amber-50 text-amber-600"
-                  : "bg-rose-50 text-rose-600",
+                  ? "bg-ochre-50 text-ochre-600"
+                  : "bg-rust-50 text-rust-600",
             )}
             title="AI extraction confidence"
           >
@@ -207,24 +196,14 @@ export function KpiCard({
           ↳ {citation}
         </p>
       ) : null}
-      {needsReview ? (
-        <p className="mt-0.5 text-[10px] font-medium text-amber-600">Needs human review</p>
-      ) : null}
+      {needsReview ? <p className="mt-0.5 text-[10px] font-medium text-ochre-600">Needs human review</p> : null}
     </div>
   );
 }
 
 // ─────────────────────────── Misc ───────────────────────────
 
-export function EmptyState({
-  title,
-  hint,
-  icon,
-}: {
-  title: string;
-  hint?: string;
-  icon?: React.ReactNode;
-}) {
+export function EmptyState({ title, hint, icon }: { title: string; hint?: string; icon?: React.ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 px-6 py-12 text-center">
       {icon ? <div className="text-ink-300">{icon}</div> : null}
@@ -242,8 +221,8 @@ export function Avatar({ name, size = 32 }: { name: string; size?: number }) {
     .join("");
   return (
     <span
-      className="inline-flex shrink-0 items-center justify-center rounded-full bg-brand-100 font-semibold text-brand-700"
-      style={{ width: size, height: size, fontSize: size * 0.4 }}
+      className="inline-flex shrink-0 items-center justify-center rounded bg-brand-100 font-semibold text-brand-700"
+      style={{ width: size, height: size, fontSize: size * 0.38 }}
     >
       {initials}
     </span>
@@ -257,20 +236,12 @@ export function StatPill({
 }: {
   label: string;
   value: React.ReactNode;
-  tone?: "default" | "good" | "warn" | "bad";
+  tone?: Tone;
 }) {
-  const toneClass =
-    tone === "good"
-      ? "text-emerald-600"
-      : tone === "warn"
-        ? "text-amber-600"
-        : tone === "bad"
-          ? "text-rose-600"
-          : "text-ink-900";
   return (
     <div className="flex flex-col">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-ink-400">{label}</span>
-      <span className={cn("text-sm font-semibold tabular-nums", toneClass)}>{value}</span>
+      <span className="label-micro font-medium text-ink-400">{label}</span>
+      <span className={cn("text-sm font-semibold tabular-nums", TONE_TEXT[tone])}>{value}</span>
     </div>
   );
 }
@@ -287,7 +258,7 @@ export function PageHeader({
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 className="text-xl font-semibold text-ink-900">{title}</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-ink-900">{title}</h1>
         {subtitle ? <p className="mt-1 text-sm text-ink-500">{subtitle}</p> : null}
       </div>
       {action ? <div className="flex items-center gap-2">{action}</div> : null}
@@ -295,16 +266,10 @@ export function PageHeader({
   );
 }
 
-export function SectionTitle({
-  children,
-  action,
-}: {
-  children: React.ReactNode;
-  action?: React.ReactNode;
-}) {
+export function SectionTitle({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="mb-3 flex items-center justify-between">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-500">{children}</h2>
+      <h2 className="label-micro font-semibold text-ink-500">{children}</h2>
       {action}
     </div>
   );
@@ -325,8 +290,8 @@ export function LinkButton({
       className={cn(
         "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
         variant === "primary"
-          ? "bg-brand-600 text-white hover:bg-brand-700"
-          : "border border-ink-200 bg-white text-ink-700 hover:bg-ink-50",
+          ? "bg-brand-700 text-canvas hover:bg-brand-800"
+          : "border border-ink-200 bg-panel text-ink-700 hover:bg-ink-100/50",
       )}
     >
       {children}

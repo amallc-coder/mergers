@@ -17,8 +17,8 @@ export default async function TasksPage() {
   const groups: { key: string; label: string; icon: React.ReactNode }[] = [
     { key: "in_progress", label: "In progress", icon: <RefreshCw size={15} className="text-brand-500" /> },
     { key: "open", label: "Open", icon: <CircleDashed size={15} className="text-ink-400" /> },
-    { key: "blocked", label: "Blocked", icon: <XCircle size={15} className="text-rose-500" /> },
-    { key: "done", label: "Done", icon: <CheckCircle2 size={15} className="text-emerald-500" /> },
+    { key: "blocked", label: "Blocked", icon: <XCircle size={15} className="text-rust-500" /> },
+    { key: "done", label: "Done", icon: <CheckCircle2 size={15} className="text-brand-500" /> },
   ];
 
   return (

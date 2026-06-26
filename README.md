@@ -53,6 +53,18 @@ npm run typecheck  # tsc --noEmit
 npm run lint
 ```
 
+### Sign in
+
+The app sits behind a role-based login. It uses a **client-side demo auth layer**
+(sessions and the editable user/role config live in the browser's `localStorage`) —
+the production design uses Supabase Auth / Microsoft Entra ID with MFA (see `/docs`).
+
+- Any password works in the demo; or click one of the listed demo accounts.
+- Each role sees a different navigation and access level (e.g. only **Admin** sees
+  the Admin console). Sign in as **Nina Patel (Admin)** to edit users and the
+  role→permission matrix under **Admin** — changes persist in your browser.
+- The external **seller portal** (`/portal/...`) is separate and token-based — no login.
+
 ### Try the demo
 
 - **Global dashboard** — `/` — pipeline health, high-risk deals, AI digest.

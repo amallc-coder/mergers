@@ -73,7 +73,7 @@ export function DiligenceTracker({
     <div>
       {/* Filter bar */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-1.5 rounded-lg border border-ink-200 bg-white px-2.5 py-1.5">
+        <div className="flex items-center gap-1.5 rounded-lg border border-ink-200 bg-panel px-2.5 py-1.5">
           <Search size={15} className="text-ink-400" />
           <input
             value={query}
@@ -117,7 +117,7 @@ export function DiligenceTracker({
               "rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset transition-colors",
               quick.has(q.key)
                 ? "bg-brand-600 text-white ring-brand-600"
-                : "bg-white text-ink-600 ring-ink-200 hover:bg-ink-50",
+                : "bg-panel text-ink-600 ring-ink-200 hover:bg-ink-50",
             )}
           >
             {q.label}
@@ -129,7 +129,7 @@ export function DiligenceTracker({
       </div>
 
       {/* Table */}
-      <div className="overflow-x-auto rounded-xl border border-ink-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-ink-200 bg-panel">
         <table className="w-full min-w-[820px] text-left text-sm">
           <thead className="border-b border-ink-100 bg-ink-50 text-xs uppercase tracking-wide text-ink-400">
             <tr>
@@ -151,7 +151,7 @@ export function DiligenceTracker({
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-ink-800">{i.name}</span>
                       {i.criticalPreSigning ? (
-                        <span className="rounded bg-rose-50 px-1 text-[10px] font-semibold text-rose-600">
+                        <span className="rounded bg-rust-50 px-1 text-[10px] font-semibold text-rust-600">
                           critical
                         </span>
                       ) : null}
@@ -172,7 +172,7 @@ export function DiligenceTracker({
                   <td className="px-3 py-2.5">
                     <ReviewStatusChip status={i.internalReviewStatus} />
                   </td>
-                  <td className={cn("px-3 py-2.5 text-xs", overdue ? "font-semibold text-rose-600" : "text-ink-500")}>
+                  <td className={cn("px-3 py-2.5 text-xs", overdue ? "font-semibold text-rust-600" : "text-ink-500")}>
                     {i.dueDate ? formatDate(i.dueDate) : "—"}
                     {overdue ? " · overdue" : ""}
                   </td>
@@ -205,7 +205,7 @@ function Select({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="rounded-lg border border-ink-200 bg-white px-2.5 py-1.5 text-sm text-ink-700 outline-none focus:border-brand-400"
+      className="rounded-lg border border-ink-200 bg-panel px-2.5 py-1.5 text-sm text-ink-700 outline-none focus:border-brand-400"
     >
       {children}
     </select>

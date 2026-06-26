@@ -99,7 +99,7 @@ export default async function GlobalDashboardPage() {
                     <div className="flex items-center gap-2">
                       <p className="truncate text-sm font-medium text-ink-900">{s.transaction.practiceName}</p>
                       {s.criticalGaps > 0 ? (
-                        <span className="inline-flex items-center gap-0.5 rounded bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-600">
+                        <span className="inline-flex items-center gap-0.5 rounded bg-rust-50 px-1.5 py-0.5 text-[10px] font-semibold text-rust-600">
                           <AlertTriangle size={10} /> {s.criticalGaps} critical
                         </span>
                       ) : null}

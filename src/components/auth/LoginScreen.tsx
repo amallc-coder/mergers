@@ -1,0 +1,107 @@
+"use client";
+
+import { useState } from "react";
+import { Activity, LogIn, ShieldCheck } from "lucide-react";
+import { useAuth } from "./AuthProvider";
+import { ROLE_LABELS } from "@/lib/domain/rbac";
+import { cn } from "@/lib/ui";
+
+export function LoginScreen() {
+  const { config, login, loginAs } = useAuth();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const activeUsers = config.users.filter((u) => u.active);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = login(email, password);
+    if (!res.ok) setError(res.error ?? "Sign-in failed.");
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-canvas px-4">
+      <div className="w-full max-w-md">
+        {/* Brand */}
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-700 text-canvas">
+            <Activity size={22} />
+          </span>
+          <div className="leading-tight">
+            <p className="text-lg font-semibold tracking-tight text-ink-900">Mergers</p>
+            <p className="label-micro text-ink-400">Healthcare M&amp;A Diligence</p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-ink-200 bg-panel p-6 shadow-card">
+          <h1 className="text-sm font-semibold uppercase tracking-wide text-ink-800">Sign in</h1>
+          <p className="mt-1 text-xs text-ink-500">Access is role-based. Sign in to continue.</p>
+
+          <form onSubmit={submit} className="mt-5 space-y-3">
+            <Field label="Work email">
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setError(null);
+                }}
+                placeholder="npatel@amadministrators.com"
+                className="w-full rounded-lg border border-ink-200 bg-canvas px-3 py-2 text-sm outline-none focus:border-brand-400"
+                required
+              />
+            </Field>
+            <Field label="Password">
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full rounded-lg border border-ink-200 bg-canvas px-3 py-2 text-sm outline-none focus:border-brand-400"
+              />
+            </Field>
+            {error ? <p className="text-xs font-medium text-rust-600">{error}</p> : null}
+            <button
+              type="submit"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-700 px-3 py-2 text-sm font-medium text-canvas hover:bg-brand-800"
+            >
+              <LogIn size={15} /> Sign in
+            </button>
+          </form>
+
+          <div className="mt-5 border-t border-ink-200/70 pt-4">
+            <p className="label-micro mb-2 text-ink-400">Demo accounts — click to sign in</p>
+            <div className="flex flex-col gap-1.5">
+              {activeUsers.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => loginAs(u.id)}
+                  className={cn(
+                    "flex items-center justify-between rounded-lg border border-ink-200 bg-canvas px-3 py-1.5 text-left text-xs transition-colors hover:border-brand-300 hover:bg-brand-50",
+                  )}
+                >
+                  <span className="font-medium text-ink-800">{u.name}</span>
+                  <span className="text-ink-500">{ROLE_LABELS[u.role]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <p className="mt-4 flex items-center justify-center gap-1.5 text-center text-[11px] text-ink-400">
+          <ShieldCheck size={12} /> Demo auth (any password). Production uses Supabase / Microsoft Entra ID with MFA.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="label-micro mb-1 block text-ink-400">{label}</span>
+      {children}
+    </label>
+  );
+}

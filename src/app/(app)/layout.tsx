@@ -1,21 +1,20 @@
-import { Sidebar } from "@/components/Sidebar";
-import { Topbar } from "@/components/Topbar";
+import { AppShell } from "@/components/auth/AppShell";
+import type { AdminUser } from "@/components/auth/AuthProvider";
 import { getRepository } from "@/lib/data/repository";
 import { getGlobalOverdueCount } from "@/lib/selectors";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const repo = getRepository();
-  const [user, overdueCount] = await Promise.all([repo.currentUser(), getGlobalOverdueCount()]);
+  const [users, overdueCount] = await Promise.all([repo.users(), getGlobalOverdueCount()]);
+
+  // Internal users seed the login + admin roster. Sellers use the token portal.
+  const initialUsers: AdminUser[] = users
+    .filter((u) => u.role !== "seller")
+    .map((u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: true }));
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar user={user} overdueCount={overdueCount} />
-        <main className="scrollbar-thin flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</div>
-        </main>
-      </div>
-    </div>
+    <AppShell initialUsers={initialUsers} overdueCount={overdueCount}>
+      {children}
+    </AppShell>
   );
 }

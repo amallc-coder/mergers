@@ -69,7 +69,7 @@ export function AiAssistant({
             <button
               key={q}
               onClick={() => ask(q)}
-              className="rounded-full border border-ink-200 bg-white px-3 py-1.5 text-xs text-ink-600 transition-colors hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+              className="rounded-full border border-ink-200 bg-panel px-3 py-1.5 text-xs text-ink-600 transition-colors hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
             >
               {q}
             </button>
@@ -86,7 +86,7 @@ export function AiAssistant({
                 "max-w-[85%] rounded-2xl px-4 py-2.5 text-sm",
                 m.role === "user"
                   ? "bg-brand-600 text-white"
-                  : "border border-ink-200 bg-white text-ink-800",
+                  : "border border-ink-200 bg-panel text-ink-800",
               )}
             >
               <p className="whitespace-pre-line">{m.text}</p>
@@ -102,7 +102,7 @@ export function AiAssistant({
           e.preventDefault();
           ask(input);
         }}
-        className="flex items-center gap-2 rounded-xl border border-ink-200 bg-white px-3 py-2"
+        className="flex items-center gap-2 rounded-xl border border-ink-200 bg-panel px-3 py-2"
       >
         <input
           value={input}
@@ -135,7 +135,7 @@ function AnswerMeta({ answer }: { answer: AssistantAnswer }) {
         <span className="rounded bg-ink-50 px-1.5 py-0.5">conf {Math.round(answer.confidence * 100)}%</span>
       ) : null}
       {answer.missingData ? (
-        <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-amber-600">
+        <span className="inline-flex items-center gap-1 rounded bg-ochre-50 px-1.5 py-0.5 text-ochre-600">
           <AlertCircle size={11} /> some data still missing
         </span>
       ) : null}

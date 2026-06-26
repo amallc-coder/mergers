@@ -47,7 +47,7 @@ export default async function KpiOverviewPage() {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-white px-4 py-3">
+    <div className="bg-panel px-4 py-3">
       <p className="text-[11px] font-medium uppercase tracking-wide text-ink-400">{label}</p>
       <p className="mt-0.5 text-lg font-semibold tabular-nums text-ink-900">{value}</p>
     </div>

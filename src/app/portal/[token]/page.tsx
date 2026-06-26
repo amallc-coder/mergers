@@ -78,9 +78,9 @@ function PortalStat({
   value: number;
   tone: "good" | "warn" | "bad";
 }) {
-  const toneClass = tone === "good" ? "text-emerald-600" : tone === "warn" ? "text-amber-600" : "text-rose-600";
+  const toneClass = tone === "good" ? "text-brand-600" : tone === "warn" ? "text-ochre-600" : "text-rust-600";
   return (
-    <div className="rounded-xl border border-ink-200 bg-white px-4 py-3 text-center">
+    <div className="rounded-xl border border-ink-200 bg-panel px-4 py-3 text-center">
       <p className="text-xs font-medium uppercase tracking-wide text-ink-400">{label}</p>
       <p className={`mt-1 text-2xl font-semibold tabular-nums ${toneClass}`}>{value}</p>
     </div>

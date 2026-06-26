@@ -59,7 +59,7 @@ export default async function TransactionsPage() {
                   </td>
                   <td className="px-3 py-3 text-center">
                     {s.criticalGaps > 0 ? (
-                      <span className="inline-flex items-center gap-0.5 text-xs font-semibold text-rose-600">
+                      <span className="inline-flex items-center gap-0.5 text-xs font-semibold text-rust-600">
                         <AlertTriangle size={12} /> {s.criticalGaps}
                       </span>
                     ) : (
@@ -67,7 +67,7 @@ export default async function TransactionsPage() {
                     )}
                   </td>
                   <td className="px-3 py-3 text-center text-xs tabular-nums text-ink-600">
-                    {s.overdue > 0 ? <span className="font-semibold text-rose-600">{s.overdue}</span> : "0"}
+                    {s.overdue > 0 ? <span className="font-semibold text-rust-600">{s.overdue}</span> : "0"}
                   </td>
                   <td className="px-3 py-3 text-xs text-ink-400">{formatDate(s.transaction.lastActivityDate)}</td>
                 </tr>

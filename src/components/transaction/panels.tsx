@@ -243,11 +243,11 @@ export function DataRoomPanel({ view }: { view: TransactionView }) {
                   </div>
                   <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-ink-400">
                     <span>{total} items</span>
-                    <span className="text-emerald-600">{f.receivedCount} received</span>
-                    <span className="text-amber-600">{f.pendingCount} pending</span>
-                    {f.deniedCount > 0 ? <span className="text-rose-600">{f.deniedCount} denied</span> : null}
+                    <span className="text-brand-600">{f.receivedCount} received</span>
+                    <span className="text-ochre-600">{f.pendingCount} pending</span>
+                    {f.deniedCount > 0 ? <span className="text-rust-600">{f.deniedCount} denied</span> : null}
                     {f.notApplicableCount > 0 ? <span>{f.notApplicableCount} N/A</span> : null}
-                    {f.overdueCount > 0 ? <span className="text-rose-600">{f.overdueCount} overdue</span> : null}
+                    {f.overdueCount > 0 ? <span className="text-rust-600">{f.overdueCount} overdue</span> : null}
                     {f.lastUploadDate ? <span>last upload {relativeTime(f.lastUploadDate)}</span> : null}
                   </div>
                 </div>
@@ -287,7 +287,7 @@ export function DataRoomPanel({ view }: { view: TransactionView }) {
                         <span>v{d.version}</span>
                         <span>· {CATEGORY_META[d.category].label}</span>
                         {(d.aiFlags ?? []).map((flag) => (
-                          <span key={flag} className="rounded bg-rose-50 px-1 font-semibold text-rose-500">
+                          <span key={flag} className="rounded bg-rust-50 px-1 font-semibold text-rust-500">
                             {flag.replace("_", " ")}
                           </span>
                         ))}
@@ -314,9 +314,9 @@ export function DataRoomPanel({ view }: { view: TransactionView }) {
 
 function SyncDot({ status }: { status: TransactionView["folders"][number]["sharePointSyncStatus"] }) {
   const map = {
-    synced: { c: "bg-emerald-500", t: "Synced" },
-    pending: { c: "bg-amber-500", t: "Pending" },
-    error: { c: "bg-rose-500", t: "Error" },
+    synced: { c: "bg-brand-500", t: "Synced" },
+    pending: { c: "bg-ochre-500", t: "Pending" },
+    error: { c: "bg-rust-500", t: "Error" },
     not_connected: { c: "bg-ink-300", t: "Not synced" },
   } as const;
   const m = map[status];
@@ -375,7 +375,7 @@ function ListCard({
   empty: string;
 }) {
   const dot =
-    tone === "bad" ? "text-rose-500" : tone === "warn" ? "text-amber-500" : tone === "good" ? "text-emerald-500" : "text-brand-500";
+    tone === "bad" ? "text-rust-500" : tone === "warn" ? "text-ochre-500" : tone === "good" ? "text-brand-500" : "text-brand-500";
   return (
     <Card>
       <CardHeader title={title} icon={icon} />
@@ -423,10 +423,10 @@ export function KpiDashboardPanel({ view }: { view: TransactionView }) {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-lg border border-ink-200 bg-white px-4 py-2.5 text-xs text-ink-500">
+      <div className="rounded-lg border border-ink-200 bg-panel px-4 py-2.5 text-xs text-ink-500">
         <span className="font-medium text-ink-700">{metrics.length}</span> metrics extracted ·{" "}
-        <span className="text-emerald-600">{metrics.filter((m) => m.source === "human").length}</span> human-reviewed ·{" "}
-        <span className="text-amber-600">{metrics.filter((m) => m.requiresHumanReview).length}</span> need review. Every value cites a source document.
+        <span className="text-brand-600">{metrics.filter((m) => m.source === "human").length}</span> human-reviewed ·{" "}
+        <span className="text-ochre-600">{metrics.filter((m) => m.requiresHumanReview).length}</span> need review. Every value cites a source document.
       </div>
       {groupsWithData.map((group) => (
         <div key={group}>
@@ -461,8 +461,8 @@ export function TasksPanel({ view, userNames }: { view: TransactionView; userNam
   const icon = {
     open: <CircleDashed size={16} className="text-ink-400" />,
     in_progress: <RefreshCw size={16} className="text-brand-500" />,
-    blocked: <XCircle size={16} className="text-rose-500" />,
-    done: <CheckCircle2 size={16} className="text-emerald-500" />,
+    blocked: <XCircle size={16} className="text-rust-500" />,
+    done: <CheckCircle2 size={16} className="text-brand-500" />,
   };
   return (
     <Card>

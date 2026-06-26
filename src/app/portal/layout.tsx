@@ -4,7 +4,7 @@ import "../globals.css";
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen bg-ink-50">
-      <header className="border-b border-ink-200 bg-white">
+      <header className="border-b border-ink-200 bg-panel">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3 sm:px-6">
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
@@ -15,7 +15,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
               <p className="text-[10px] uppercase tracking-wide text-ink-400">Healthcare M&amp;A Diligence</p>
             </div>
           </div>
-          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+          <span className="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20">
             Encrypted · Access-controlled
           </span>
         </div>

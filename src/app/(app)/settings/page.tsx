@@ -77,7 +77,7 @@ export default async function SettingsPage() {
                 <p className="text-sm font-medium text-ink-900">{AMA_DILIGENCE_TEMPLATE.name}</p>
                 <p className="text-xs text-ink-400">Version {AMA_DILIGENCE_TEMPLATE.version} · {AMA_DILIGENCE_TEMPLATE.items.length} items · 8 categories</p>
               </div>
-              <Badge className="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Default</Badge>
+              <Badge className="bg-brand-50 text-brand-700 ring-brand-600/20">Default</Badge>
             </div>
             <p className="mt-3 text-xs text-ink-500">{AMA_DILIGENCE_TEMPLATE.description}</p>
           </div>
@@ -107,7 +107,7 @@ function ToggleRow({ icon, label, on = false }: { icon: React.ReactNode; label: 
       <span
         className={`relative inline-flex h-5 w-9 items-center rounded-full ${on ? "bg-brand-600" : "bg-ink-200"}`}
       >
-        <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${on ? "translate-x-4" : "translate-x-0.5"}`} />
+        <span className={`inline-block h-4 w-4 transform rounded-full bg-panel transition ${on ? "translate-x-4" : "translate-x-0.5"}`} />
       </span>
     </div>
   );
