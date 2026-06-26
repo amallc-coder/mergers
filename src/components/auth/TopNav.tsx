@@ -9,7 +9,7 @@ import { Avatar } from "@/components/ui";
 import { cn } from "@/lib/ui";
 
 const NAV: { href: string; label: string; perm?: Permission }[] = [
-  { href: "/", label: "Financial" },
+  { href: "/", label: "Home" },
   { href: "/transactions", label: "Transactions", perm: "transaction:read" },
   { href: "/data-rooms", label: "Data Rooms", perm: "dataroom:read" },
   { href: "/diligence", label: "Diligence", perm: "diligence:read" },
