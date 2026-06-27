@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Activity, LogIn, ShieldCheck } from "lucide-react";
+import { LogIn, ShieldCheck } from "lucide-react";
 import { useAuth } from "./AuthProvider";
+import { BrandMark } from "@/components/Brand";
 import { ROLE_LABELS } from "@/lib/domain/rbac";
 import { cn } from "@/lib/ui";
 
@@ -25,9 +26,7 @@ export function LoginScreen() {
       <div className="w-full max-w-md">
         {/* Brand */}
         <div className="mb-6 flex items-center justify-center gap-2.5">
-          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-700 text-canvas">
-            <Activity size={22} />
-          </span>
+          <BrandMark size={40} />
           <div className="leading-tight">
             <p className="text-lg font-semibold tracking-tight text-ink-900">clinilytics</p>
             <p className="label-micro text-ink-400">M&amp;A · Healthcare Diligence</p>

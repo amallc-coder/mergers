@@ -1,4 +1,4 @@
-import { ShieldCheck } from "lucide-react";
+import { BrandMark } from "@/components/Brand";
 import "../globals.css";
 
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
@@ -7,9 +7,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
       <header className="border-b border-ink-200 bg-panel">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3 sm:px-6">
           <div className="flex items-center gap-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
-              <ShieldCheck size={18} />
-            </span>
+            <BrandMark size={32} />
             <div className="leading-tight">
               <p className="text-sm font-semibold text-ink-900">Secure Seller Portal</p>
               <p className="text-[10px] uppercase tracking-wide text-ink-400">clinilytics M&amp;A</p>

@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, AlertTriangle, LogOut } from "lucide-react";
+import { AlertTriangle, LogOut } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import { ROLE_LABELS, type Permission } from "@/lib/domain/rbac";
 import { Avatar } from "@/components/ui";
+import { BrandMark } from "@/components/Brand";
 import { cn } from "@/lib/ui";
 
 const NAV: { href: string; label: string; perm?: Permission }[] = [
@@ -34,9 +35,7 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
       {/* Row 1: brand + status + account */}
       <div className="flex h-12 items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-700 text-canvas">
-            <Activity size={16} />
-          </span>
+          <BrandMark size={26} />
           <span className="text-[15px] font-semibold tracking-tight text-ink-900">clinilytics</span>
           <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
             M&amp;A
