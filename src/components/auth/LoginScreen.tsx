@@ -29,8 +29,8 @@ export function LoginScreen() {
             <Activity size={22} />
           </span>
           <div className="leading-tight">
-            <p className="text-lg font-semibold tracking-tight text-ink-900">Mergers</p>
-            <p className="label-micro text-ink-400">Healthcare M&amp;A Diligence</p>
+            <p className="text-lg font-semibold tracking-tight text-ink-900">clinilytics</p>
+            <p className="label-micro text-ink-400">M&amp;A · Healthcare Diligence</p>
           </div>
         </div>
 

@@ -33,15 +33,12 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
     <header className="sticky top-0 z-20 border-b border-ink-200 bg-panel">
       {/* Row 1: brand + status + account */}
       <div className="flex h-12 items-center justify-between gap-4 px-4 sm:px-6">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded bg-brand-700 text-canvas">
+        <div className="flex items-center gap-2">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-700 text-canvas">
             <Activity size={16} />
           </span>
-          <span className="text-sm font-semibold tracking-tight text-ink-900">mergers</span>
-          <span className="rounded bg-ink-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
-            Diligence
-          </span>
-          <span className="hidden rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700 sm:inline">
+          <span className="text-[15px] font-semibold tracking-tight text-ink-900">clinilytics</span>
+          <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
             M&amp;A
           </span>
         </div>
@@ -72,7 +69,7 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
       </div>
 
       {/* Row 2: main nav */}
-      <nav className="scrollbar-thin flex items-center gap-1 overflow-x-auto px-3 sm:px-5">
+      <nav className="scrollbar-thin flex h-11 items-center gap-1 overflow-x-auto border-t border-ink-200/70 px-3 sm:px-5">
         {items.map((item) => {
           const active = isActive(item.href);
           return (
@@ -80,7 +77,7 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
               key={item.href}
               href={item.href}
               className={cn(
-                "shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                "inline-flex shrink-0 items-center rounded-md px-3 py-1.5 text-xs font-medium leading-none transition-colors",
                 active ? "bg-ink-900 text-canvas" : "text-ink-600 hover:bg-ink-100/60 hover:text-ink-900",
               )}
             >
@@ -89,7 +86,6 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
           );
         })}
       </nav>
-      <div className="h-px bg-ink-200/70" />
     </header>
   );
 }

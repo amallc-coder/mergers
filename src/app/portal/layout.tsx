@@ -12,7 +12,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
             </span>
             <div className="leading-tight">
               <p className="text-sm font-semibold text-ink-900">Secure Seller Portal</p>
-              <p className="text-[10px] uppercase tracking-wide text-ink-400">Healthcare M&amp;A Diligence</p>
+              <p className="text-[10px] uppercase tracking-wide text-ink-400">clinilytics M&amp;A</p>
             </div>
           </div>
           <span className="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20">
