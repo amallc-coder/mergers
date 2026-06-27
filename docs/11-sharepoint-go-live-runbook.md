@@ -19,6 +19,7 @@ folders per deal, and moving/organizing files.
 
 ## Provisioned (already done)
 
+- **Entra app:** `clinilytics M&A — SharePoint sync` — client ID `632f1c4a-7a7b-4800-a39d-51e4f26a8c81`
 - **Supabase project:** `clinilytics-ma` — ref `gyligrsjpvniupfvczqb`, region `us-east-1`
 - **API URL:** `https://gyligrsjpvniupfvczqb.supabase.co`
 - **Migrations applied:** `0001_schema`, `0002_rls`, `0003_sharepoint_connection`, `0004_seed_reference_data`
@@ -64,11 +65,11 @@ immediately (you can't see it again). This is `AZURE_CLIENT_SECRET`.
 
 | Permission | Why |
 | --- | --- |
-| `Sites.Selected` | App can act **only on sites you explicitly grant** (not the whole tenant). Recommended. |
-| `Files.ReadWrite.All` | Read/create/move files within granted sites. |
+| `Sites.Selected` | App acts **only on sites you explicitly grant** (not the whole tenant). This is the **only** Graph permission needed. |
 
-> Prefer `Sites.Selected` over `Sites.ReadWrite.All`. With `Sites.Selected` the app has **zero**
-> access until you grant it the single M&A Diligence site (Step 4), which is the secure default.
+> `Sites.Selected` gives the app **zero** access until you grant it the single M&A Diligence site
+> (Step 4) with the `write` role — the secure default. No tenant-wide file permission (`Files.ReadWrite.All`)
+> is required, because the per-site `write` grant covers create/upload/move within that site's drive.
 
 ## Step 3 — Get admin consent  ← *your blocker; here's how*
 
