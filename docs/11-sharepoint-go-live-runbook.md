@@ -13,8 +13,19 @@ folders per deal, and moving/organizing files.
 | SharePoint host | `amadmins.sharepoint.com` |
 | Library path | `Shared Documents / M&A Diligence` |
 | **Drive ID** (M&A Diligence lib) | `b!Cj5_yGQ_ZkORjWITXqQBVzRmobB3fBpMikLZPJHC1qo5ppUh7DCvQLmnnLS6mI9S` |
+| **Site ID** (for `Sites.Selected` grant) | `amadmins.sharepoint.com,c87f3e0a-3f64-4366-918d-62135ea40157,b0a16634-7c77-4c1a-8a42-d93c91c2d6aa` |
 | Existing deal folders | 29 × `Data Room - <Practice>` |
 | Supabase org | `AMA` (`elytgawkyqjwrqoacyoc`) |
+
+## Provisioned (already done)
+
+- **Supabase project:** `clinilytics-ma` — ref `gyligrsjpvniupfvczqb`, region `us-east-1`
+- **API URL:** `https://gyligrsjpvniupfvczqb.supabase.co`
+- **Migrations applied:** `0001_schema`, `0002_rls`, `0003_sharepoint_connection`, `0004_seed_reference_data`
+- **Edge Function deployed:** `sharepoint` (JWT-protected) →
+  `https://gyligrsjpvniupfvczqb.supabase.co/functions/v1/sharepoint`
+
+Remaining: the Entra app + admin consent + site grant, then set the function secrets below.
 
 ## Architecture
 
