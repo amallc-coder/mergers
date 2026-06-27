@@ -1,32 +1,41 @@
 # SharePoint Go-Live Runbook (clinilytics M&A)
 
-This is the step-by-step to make the platform **actually** read from and write to your
-SharePoint M&A Diligence library — pulling documents, auto-creating the category
-folders per deal, and moving/organizing files.
+This makes the platform **actually** read from and write to your SharePoint — pulling
+documents, auto-creating the category folders per deal, and moving/organizing files.
 
-## Your environment (already discovered)
+> **Target site (decided):** the dedicated **Merger & Acquisition** site,
+> `https://amadmins.sharepoint.com/sites/MergerAcquisition`, where **Nish is a site
+> admin**. We point here (not the tenant root site) precisely because the per-site
+> permission grant in Step 4 can be approved by a site admin — you don't have to wait on
+> a tenant Global Admin.
+
+## Environment (confirmed)
 
 | Thing | Value |
 | --- | --- |
 | Microsoft tenant | `amadministrators.com` |
 | **Tenant ID** | `f73a517c-4c95-4e9b-a1f1-75682a29db48` |
 | SharePoint host | `amadmins.sharepoint.com` |
-| Library path | `Shared Documents / M&A Diligence` |
-| **Drive ID** (M&A Diligence lib) | `b!Cj5_yGQ_ZkORjWITXqQBVzRmobB3fBpMikLZPJHC1qo5ppUh7DCvQLmnnLS6mI9S` |
-| **Site ID** (for `Sites.Selected` grant) | `amadmins.sharepoint.com,c87f3e0a-3f64-4366-918d-62135ea40157,b0a16634-7c77-4c1a-8a42-d93c91c2d6aa` |
-| Existing deal folders | 29 × `Data Room - <Practice>` |
+| **Target site** | `Merger & Acquisition` — `/sites/MergerAcquisition` |
+| **Site ID** (for the Step 4 grant) | `amadmins.sharepoint.com,1996d83e-3c65-4084-a5ed-c7c14230a6a4,46c4d59a-e9d2-4937-8418-d96fb37aafd6` |
+| **Drive ID** (default document library) | `b!PtiWGWU8hECl7cfBQjCmpJrVxEbS6TdJhBjZb7N6r9YUnFaSuQLRQLoYOMc_JcN6` |
+| Entra app (client) ID | `632f1c4a-7a7b-4800-a39d-51e4f26a8c81` (display name "Clinilytics MA") |
+| Client secret **ID** (not the value) | `5c8a0df6-49d9-422b-be46-9967e6f5f092` |
 | Supabase org | `AMA` (`elytgawkyqjwrqoacyoc`) |
+| Supabase project | `clinilytics-ma` — ref `gyligrsjpvniupfvczqb`, region `us-east-1` |
+| Edge Function URL | `https://gyligrsjpvniupfvczqb.supabase.co/functions/v1/sharepoint` |
 
-## Provisioned (already done)
+## Status
 
-- **Entra app:** `clinilytics M&A — SharePoint sync` — client ID `632f1c4a-7a7b-4800-a39d-51e4f26a8c81`
-- **Supabase project:** `clinilytics-ma` — ref `gyligrsjpvniupfvczqb`, region `us-east-1`
-- **API URL:** `https://gyligrsjpvniupfvczqb.supabase.co`
-- **Migrations applied:** `0001_schema`, `0002_rls`, `0003_sharepoint_connection`, `0004_seed_reference_data`
-- **Edge Function deployed:** `sharepoint` (JWT-protected) →
-  `https://gyligrsjpvniupfvczqb.supabase.co/functions/v1/sharepoint`
+| Step | Owner | State |
+| --- | --- | --- |
+| Entra app registered + client secret created | IT admin | ✅ done |
+| Graph permission `Sites.Selected` (Application) **admin-consented** | IT admin | ✅ done — the app token carries `roles: ["Sites.Selected"]` |
+| Azure secrets set in Supabase (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) | Nish | ✅ done |
+| Edge Function `sharepoint` deployed | Nish | ⚠️ v7 live (points at old root-site drive). New version that targets this site is in the repo, pending deploy. |
+| **Per-site `write` grant for the app on the M&A site** | **IT admin (or site admin via PnP)** | ⛔ **the one remaining blocker — Step 4** |
 
-Remaining: the Entra app + admin consent + site grant, then set the function secrets below.
+Once Step 4 lands, the app can list/create/move everything in this site's library.
 
 ## Architecture
 
@@ -37,131 +46,122 @@ Browser (clinilytics, Supabase Auth login)
 Supabase Edge Function  "sharepoint"   ← holds the Azure client secret (never in the browser)
         │  app-only Microsoft Graph (client credentials)
         ▼
-Microsoft Graph  →  SharePoint  (amadmins.sharepoint.com / M&A Diligence)
-        │
-        └─ writes file + folder metadata back into Supabase Postgres
+Microsoft Graph  →  SharePoint  (/sites/MergerAcquisition, default document library)
 ```
 
-The secret lives only in the Edge Function. The browser never sees Azure credentials.
+The Azure secret lives only in the Edge Function. The browser never sees it.
 
 ---
 
-## Step 1 — Register an Entra (Azure AD) application
+## Step 4 — Grant the app `write` on the Merger & Acquisition site  ← the blocker
 
-Do this at **https://entra.microsoft.com** → *Applications → App registrations → New registration*.
+`Sites.Selected` gives the app **zero** access until a specific site is granted to it.
+Someone whose identity carries the `Sites.FullControl.All` application permission (your IT
+admin, who registered the app and granted consent) runs this **once**:
 
-- **Name:** `clinilytics M&A — SharePoint sync`
-- **Supported account types:** *Single tenant*
-- **Redirect URI:** leave blank (this is a daemon / app-only integration)
-- Click **Register**. Copy the **Application (client) ID** and the **Directory (tenant) ID**
-  (tenant ID should match `f73a517c-4c95-4e9b-a1f1-75682a29db48`).
-
-Then create a secret: *Certificates & secrets → New client secret* → copy the **Value**
-immediately (you can't see it again). This is `AZURE_CLIENT_SECRET`.
-
-## Step 2 — Add Microsoft Graph permissions (least privilege)
-
-*API permissions → Add a permission → Microsoft Graph → **Application permissions***:
-
-| Permission | Why |
-| --- | --- |
-| `Sites.Selected` | App acts **only on sites you explicitly grant** (not the whole tenant). This is the **only** Graph permission needed. |
-
-> `Sites.Selected` gives the app **zero** access until you grant it the single M&A Diligence site
-> (Step 4) with the `write` role — the secure default. No tenant-wide file permission (`Files.ReadWrite.All`)
-> is required, because the per-site `write` grant covers create/upload/move within that site's drive.
-
-## Step 3 — Get admin consent  ← *your blocker; here's how*
-
-Application permissions always require a **one-time admin consent** by a Global Administrator
-(or Privileged Role / Cloud Application Administrator). Three ways, easiest first:
-
-**A. If you ARE an admin:** on the app's *API permissions* page click **“Grant admin consent for
-American Medical Administrators.”** Done.
-
-**B. If you're NOT an admin — send your admin a consent link.** After Step 1 you have the client
-ID; send this URL to whoever administers your Microsoft 365 — they sign in once and click *Accept*:
-
-```
-https://login.microsoftonline.com/f73a517c-4c95-4e9b-a1f1-75682a29db48/adminconsent?client_id=<YOUR_CLIENT_ID>
-```
-
-**C. Don't know who the admin is?** Find them at **https://admin.microsoft.com** → *Roles → Role
-assignments → Global Administrator* (shows who holds it). For a company your size it's often the
-person who set up Microsoft 365 / your outsourced IT (MSP). Forward them the link from option B
-plus this runbook.
-
-> How to tell if it's you: open the app's API permissions page — if the **“Grant admin consent”**
-> button is enabled (not greyed out) and succeeds, you're an admin. If it errors with
-> "you do not have permission," you're not, so use option B/C.
-
-## Step 4 — Grant the app access to just the M&A Diligence site (`Sites.Selected`)
-
-After consent, the app still needs to be granted the specific site. An admin runs this once
-(Graph Explorer at https://developer.microsoft.com/graph/graph-explorer, or we expose a one-click
-button in **Settings → Integrations**):
+**Option A — Graph Explorer** (https://developer.microsoft.com/graph/graph-explorer), signed
+in as that admin:
 
 ```http
-POST https://graph.microsoft.com/v1.0/sites/{siteId}/permissions
+POST https://graph.microsoft.com/v1.0/sites/amadmins.sharepoint.com,1996d83e-3c65-4084-a5ed-c7c14230a6a4,46c4d59a-e9d2-4937-8418-d96fb37aafd6/permissions
+Content-Type: application/json
+
 {
   "roles": ["write"],
-  "grantedToIdentities": [{ "application": { "id": "<YOUR_CLIENT_ID>", "displayName": "clinilytics M&A" } }]
+  "grantedToIdentities": [
+    { "application": { "id": "632f1c4a-7a7b-4800-a39d-51e4f26a8c81", "displayName": "Clinilytics MA" } }
+  ]
 }
 ```
 
-Get `{siteId}` with: `GET https://graph.microsoft.com/v1.0/sites/amadmins.sharepoint.com:/`
-→ use the returned `id` (looks like `amadmins.sharepoint.com,<guid>,<guid>`).
+A `201 Created` response means the grant is live. (Use `"roles": ["fullcontrol"]` instead
+of `["write"]` only if you also want the app to manage permissions; `write` is enough to
+read, create folders, upload, and move.)
 
-## Step 5 — Create the Supabase project + set secrets
+**Option B — PnP PowerShell**, which a **site-collection admin** can run for their own site:
 
-1. Create a project in the **AMA** org (or let me create it for you): name `clinilytics-ma`,
-   region `us-east-1`.
-2. Apply the SQL migrations from `/supabase/migrations` (schema + RLS + the new
-   `0003_sharepoint_connection.sql`).
-3. Set Edge Function secrets (Project → Edge Functions → Secrets, or CLI):
-
-```bash
-supabase secrets set \
-  AZURE_TENANT_ID=f73a517c-4c95-4e9b-a1f1-75682a29db48 \
-  AZURE_CLIENT_ID=<YOUR_CLIENT_ID> \
-  AZURE_CLIENT_SECRET=<YOUR_CLIENT_SECRET> \
-  SHAREPOINT_DRIVE_ID=b!Cj5_yGQ_ZkORjWITXqQBVzRmobB3fBpMikLZPJHC1qo5ppUh7DCvQLmnnLS6mI9S \
-  SHAREPOINT_SITE_ID=<from Step 4> \
-  SHAREPOINT_ROOT_FOLDER="M&A Diligence"
+```powershell
+Connect-PnPOnline -Url https://amadmins.sharepoint.com/sites/MergerAcquisition -Interactive
+Grant-PnPAzureADAppSitePermission `
+  -AppId 632f1c4a-7a7b-4800-a39d-51e4f26a8c81 `
+  -DisplayName "Clinilytics MA" `
+  -Site https://amadmins.sharepoint.com/sites/MergerAcquisition `
+  -Permissions Write
 ```
 
-4. Deploy the function: `supabase functions deploy sharepoint`
+(First-time PnP use may prompt `Register-PnPManagementShellAccess`, a one-time tenant consent
+for the PnP shell app.)
 
-## Step 6 — Point the app at Supabase
+## Step 5 — Deploy the site-aware Edge Function
 
-Set in the frontend env (`.env`):
+The repo's `supabase/functions/sharepoint/index.ts` resolves the document library at runtime
+from the site ID, so it needs no drive ID hardcoded. Deploy it:
+
+```bash
+supabase functions deploy sharepoint --project-ref gyligrsjpvniupfvczqb
+```
+
+Function env (Project → Edge Functions → Secrets). Only the three Azure values are required;
+the site defaults to Merger & Acquisition in code:
+
+```bash
+AZURE_TENANT_ID=f73a517c-4c95-4e9b-a1f1-75682a29db48
+AZURE_CLIENT_ID=632f1c4a-7a7b-4800-a39d-51e4f26a8c81
+AZURE_CLIENT_SECRET=<the secret VALUE — set directly in Supabase, never paste it in chat>
+# Optional overrides:
+# SHAREPOINT_SITE_ID=<override the default M&A site>
+# SHAREPOINT_ROOT_FOLDER=<nest data rooms under a folder; default = library root>
+```
+
+> **No-redeploy fallback** if you can't deploy right now: the live v7 function reads
+> `SHAREPOINT_DRIVE_ID` + `SHAREPOINT_ROOT_FOLDER` from secrets. Set
+> `SHAREPOINT_DRIVE_ID=b!PtiWGWU8hECl7cfBQjCmpJrVxEbS6TdJhBjZb7N6r9YUnFaSuQLRQLoYOMc_JcN6`,
+> set `SHAREPOINT_ROOT_FOLDER=M&A Diligence`, and create one empty folder named
+> `M&A Diligence` in this site's **Documents** library. v7 will then operate inside it.
+> The repo version is cleaner (auto-creates folders, works at the library root) — prefer
+> deploying it when you can.
+
+## Step 6 — Verify end to end
+
+After Step 4, confirm the app can see the site (the `whoami` action decodes the app token and
+tries to resolve this site's drive):
+
+```bash
+curl -sS https://gyligrsjpvniupfvczqb.supabase.co/functions/v1/sharepoint \
+  -H "Authorization: Bearer <SUPABASE_ANON_OR_USER_JWT>" \
+  -H "apikey: <SUPABASE_ANON_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"whoami"}'
+```
+
+- `roles` should include `Sites.Selected` (consent) and `resolvedDriveId` should be non-null
+  with no `driveError` (the Step 4 grant worked).
+- Then `{"action":"status"}` → `connected: true`.
+- Then `{"action":"ensureDataRoom","practiceName":"Dr. Stein"}` → creates
+  `Data Room - Dr. Stein` + the 10 category subfolders in the library.
+- Then `{"action":"listDocuments","practiceName":"Dr. Stein"}` → returns the files.
+
+## Step 7 — Point the app at Supabase
+
+Frontend env (`.env`):
 
 ```
 DATA_BACKEND=supabase
-NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_URL=https://gyligrsjpvniupfvczqb.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
 ```
 
-The app's **Settings → Integrations → SharePoint** page then shows **Connected**, and:
-- Creating a transaction calls `sharepoint:ensureDataRoom` → creates `Data Room - <name>` + the 10
-  category subfolders.
-- The Data Room tab calls `sharepoint:listDocuments` → pulls files + metadata.
-- Drag-to-recategorize calls `sharepoint:moveDocument` → moves the file in SharePoint.
-- A scheduled `sharepoint:deltaSync` keeps metadata current.
+Then **Settings → Integrations → SharePoint** shows **Connected**, creating a transaction
+auto-provisions its data room, the Data Room tab lists live files, and drag-to-recategorize
+moves the file in SharePoint.
 
 ---
 
-## What needs you vs. what's already built
+## Note on the 29 existing data rooms
 
-| Step | Who | Status |
-| --- | --- | --- |
-| Edge Function `sharepoint` (Graph: ensure folders, list, move, delta) | **built** | `supabase/functions/sharepoint/` |
-| SQL: connection/config + document/folder tables | **built** | `supabase/migrations/` |
-| Frontend client wiring | **built** | `src/lib/sharepoint/client.ts` |
-| Entra app registration + secret | you | Step 1 |
-| **Admin consent** | you / your admin | Step 3 ← the long pole |
-| Grant `Sites.Selected` to the M&A site | admin | Step 4 |
-| Supabase project + secrets + deploy | you (or I can create the project) | Step 5 |
-
-**Recommended order:** start Step 3 (admin consent) today — it's the only step with a human
-dependency outside your control. Everything else takes minutes once consent lands.
+The 29 `Data Room - <Practice>` folders discovered earlier live on the **tenant root site's**
+`M&A Diligence` library — a different site from this one. Pointing the app at
+`/sites/MergerAcquisition` means it won't see those existing folders until they're either
+(a) moved/copied into this site's library, or (b) the app is *also* granted on the root site
+(which needs a Global Admin — the path that was blocked). Decide per your preference; the
+integration itself works the same against whichever site is granted in Step 4.

@@ -4,15 +4,32 @@
 // this function's secrets — never in the browser. Supabase verifies the caller's JWT
 // by default, so only authenticated app users can invoke it.
 //
+// Target site: the dedicated "Merger & Acquisition" SharePoint site
+//   https://amadmins.sharepoint.com/sites/MergerAcquisition
+// The drive (document library) is resolved at runtime from SHAREPOINT_SITE_ID, so the
+// integration keeps working even if the library is rebuilt. Set
+// SHAREPOINT_DRIVE_ID_OVERRIDE only if you must pin a specific library.
+//
 // Deploy:  supabase functions deploy sharepoint
-// Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
-//          SHAREPOINT_DRIVE_ID, SHAREPOINT_ROOT_FOLDER  (e.g. "M&A Diligence")
+// Secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+// Optional: SHAREPOINT_SITE_ID, SHAREPOINT_DRIVE_ID_OVERRIDE, SHAREPOINT_ROOT_FOLDER
 
 const TENANT = Deno.env.get("AZURE_TENANT_ID")!;
 const CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
 const CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
-const DRIVE_ID = Deno.env.get("SHAREPOINT_DRIVE_ID")!;
-const ROOT_FOLDER = Deno.env.get("SHAREPOINT_ROOT_FOLDER") ?? "M&A Diligence";
+
+// Default to the dedicated Merger & Acquisition site (Nish is site admin here).
+const SITE_ID =
+  Deno.env.get("SHAREPOINT_SITE_ID") ??
+  "amadmins.sharepoint.com,1996d83e-3c65-4084-a5ed-c7c14230a6a4,46c4d59a-e9d2-4937-8418-d96fb37aafd6";
+
+// Only honour an EXPLICIT override. We intentionally do NOT fall back to the legacy
+// SHAREPOINT_DRIVE_ID secret, which points at the old root site's library.
+const DRIVE_ID_OVERRIDE = Deno.env.get("SHAREPOINT_DRIVE_ID_OVERRIDE") ?? "";
+
+// Empty string => operate at the document library root (the dedicated site IS the M&A
+// area, so data rooms live at the top of the library). Set a name to nest them.
+const ROOT_FOLDER = Deno.env.get("SHAREPOINT_ROOT_FOLDER") ?? "";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
@@ -64,49 +81,70 @@ async function graph(token: string, path: string, init: RequestInit = {}) {
   return res.status === 204 ? {} : await res.json();
 }
 
-const drivePath = (p: string) => `/drives/${DRIVE_ID}/root:/${p.split("/").map(encodeURIComponent).join("/")}`;
+/** Resolve the document library (drive) for the configured site, once per request. */
+async function resolveDriveId(token: string): Promise<string> {
+  if (DRIVE_ID_OVERRIDE) return DRIVE_ID_OVERRIDE;
+  const d = await graph(token, `/sites/${SITE_ID}/drive?$select=id,name,webUrl`);
+  if (!d?.id) throw new Error(`could not resolve default drive for site ${SITE_ID}`);
+  return d.id as string;
+}
+
+function drivePath(driveId: string, p: string) {
+  const enc = p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return enc ? `/drives/${driveId}/root:/${enc}` : `/drives/${driveId}/root`;
+}
 
 /** Get a drive item by path under the library root, or null if missing. */
-function getByPath(token: string, path: string) {
-  return graph(token, drivePath(path));
+function getByPath(token: string, driveId: string, path: string) {
+  return graph(token, drivePath(driveId, path));
 }
 
 /** Ensure a child folder exists under parentId; returns the folder item. */
-async function ensureChildFolder(token: string, parentId: string, name: string, fullPath: string) {
-  const existing = await getByPath(token, fullPath);
+async function ensureChildFolder(token: string, driveId: string, parentId: string, name: string, fullPath: string) {
+  const existing = await getByPath(token, driveId, fullPath);
   if (existing) return existing;
-  return await graph(token, `/drives/${DRIVE_ID}/items/${parentId}/children`, {
+  return await graph(token, `/drives/${driveId}/items/${parentId}/children`, {
     method: "POST",
     body: JSON.stringify({ name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }),
   });
 }
 
+/** The item under which data rooms are created: the library root, or ROOT_FOLDER if set. */
+async function ensureRootItem(token: string, driveId: string) {
+  if (!ROOT_FOLDER) return await graph(token, `/drives/${driveId}/root`);
+  const existing = await getByPath(token, driveId, ROOT_FOLDER);
+  if (existing) return existing;
+  const root = await graph(token, `/drives/${driveId}/root`);
+  return await ensureChildFolder(token, driveId, root.id, ROOT_FOLDER, ROOT_FOLDER);
+}
+
+const dataRoomPath = (name: string) => (ROOT_FOLDER ? `${ROOT_FOLDER}/${name}` : name);
+
 // ── Actions ─────────────────────────────────────────────────────
 
 /** Create (idempotently) the data-room folder + the 10 category subfolders. */
-async function ensureDataRoom(token: string, practiceName: string) {
-  const root = await getByPath(token, ROOT_FOLDER);
-  if (!root) throw new Error(`Root folder "${ROOT_FOLDER}" not found in drive`);
+async function ensureDataRoom(token: string, driveId: string, practiceName: string) {
+  const root = await ensureRootItem(token, driveId);
   const dataRoomName = `Data Room - ${practiceName}`;
-  const dataRoom = await ensureChildFolder(token, root.id, dataRoomName, `${ROOT_FOLDER}/${dataRoomName}`);
+  const dataRoom = await ensureChildFolder(token, driveId, root.id, dataRoomName, dataRoomPath(dataRoomName));
 
   const folders: Record<string, { id: string; webUrl: string }> = {};
   for (const cat of CATEGORY_FOLDERS) {
-    const f = await ensureChildFolder(token, dataRoom.id, cat, `${ROOT_FOLDER}/${dataRoomName}/${cat}`);
+    const f = await ensureChildFolder(token, driveId, dataRoom.id, cat, `${dataRoomPath(dataRoomName)}/${cat}`);
     folders[cat] = { id: f.id, webUrl: f.webUrl };
   }
   return { dataRoom: { id: dataRoom.id, name: dataRoomName, webUrl: dataRoom.webUrl }, folders };
 }
 
 /** List all files under a data room (recursively), returning metadata. */
-async function listDocuments(token: string, practiceName: string) {
+async function listDocuments(token: string, driveId: string, practiceName: string) {
   const dataRoomName = `Data Room - ${practiceName}`;
-  const root = await getByPath(token, `${ROOT_FOLDER}/${dataRoomName}`);
+  const root = await getByPath(token, driveId, dataRoomPath(dataRoomName));
   if (!root) return { files: [] };
 
   const files: unknown[] = [];
   async function walk(itemId: string, categoryFolder: string) {
-    let next: string | null = `/drives/${DRIVE_ID}/items/${itemId}/children?$top=200`;
+    let next: string | null = `/drives/${driveId}/items/${itemId}/children?$top=200`;
     while (next) {
       const page = await graph(token, next);
       for (const child of page.value ?? []) {
@@ -133,10 +171,10 @@ async function listDocuments(token: string, practiceName: string) {
 }
 
 /** Move a file to a different folder (re-categorize / organize). */
-async function moveDocument(token: string, itemId: string, targetFolderId: string, newName?: string) {
+async function moveDocument(token: string, driveId: string, itemId: string, targetFolderId: string, newName?: string) {
   const body: Record<string, unknown> = { parentReference: { id: targetFolderId } };
   if (newName) body.name = newName;
-  const updated = await graph(token, `/drives/${DRIVE_ID}/items/${itemId}`, {
+  const updated = await graph(token, `/drives/${driveId}/items/${itemId}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
@@ -144,8 +182,8 @@ async function moveDocument(token: string, itemId: string, targetFolderId: strin
 }
 
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
-async function deltaSync(token: string, deltaLink?: string) {
-  const start = deltaLink ?? `/drives/${DRIVE_ID}/root/delta`;
+async function deltaSync(token: string, driveId: string, deltaLink?: string) {
+  const start = deltaLink ?? `/drives/${driveId}/root/delta`;
   const changes: unknown[] = [];
   let next: string | null = start;
   let nextDelta: string | null = null;
@@ -173,14 +211,56 @@ async function deltaSync(token: string, deltaLink?: string) {
 }
 
 /** Verify the connection works and we can see the drive. */
-async function status(token: string) {
-  const drive = await graph(token, `/drives/${DRIVE_ID}`);
-  const root = await getByPath(token, ROOT_FOLDER);
+async function status(token: string, driveId: string) {
+  const drive = await graph(token, `/drives/${driveId}?$select=id,name,webUrl`);
+  const root = ROOT_FOLDER ? await getByPath(token, driveId, ROOT_FOLDER) : drive;
   return {
     connected: !!drive,
+    siteId: SITE_ID,
+    driveId,
     driveName: drive?.name,
-    rootFolder: ROOT_FOLDER,
+    driveWebUrl: drive?.webUrl,
+    rootFolder: ROOT_FOLDER || "(library root)",
     rootFolderExists: !!root,
+  };
+}
+
+/** Decode the app-only JWT payload (no signature check — diagnostics only). */
+function decodeJwt(token: string): Record<string, unknown> {
+  const part = token.split(".")[1] ?? "";
+  const pad = part.length % 4 ? 4 - (part.length % 4) : 0;
+  const b64 = (part + "=".repeat(pad)).replace(/-/g, "+").replace(/_/g, "/");
+  return JSON.parse(atob(b64));
+}
+
+/** Diagnostics: what identity/roles does our app token carry, and can it see the drive? */
+async function whoami(token: string) {
+  let claims: Record<string, unknown> = {};
+  try {
+    claims = decodeJwt(token);
+  } catch (e) {
+    claims = { decodeError: String(e) };
+  }
+  let resolvedDriveId: string | null = null;
+  let driveName: string | null = null;
+  let driveError: string | null = null;
+  try {
+    const d = await graph(token, `/sites/${SITE_ID}/drive?$select=id,name,webUrl`);
+    resolvedDriveId = (d?.id as string) ?? null;
+    driveName = (d?.name as string) ?? null;
+  } catch (e) {
+    driveError = String(e);
+  }
+  return {
+    appid: claims.appid ?? claims.azp ?? null,
+    appDisplayName: claims.app_displayname ?? null,
+    roles: claims.roles ?? [],
+    tenant: claims.tid ?? null,
+    audience: claims.aud ?? null,
+    siteId: SITE_ID,
+    resolvedDriveId,
+    driveName,
+    driveError,
   };
 }
 
@@ -192,22 +272,32 @@ Deno.serve(async (req) => {
     const { action, ...args } = await req.json();
     const token = await getToken();
 
+    // whoami doesn't need a resolved drive (it reports drive resolution itself).
+    if (action === "whoami") {
+      const result = await whoami(token);
+      return new Response(JSON.stringify({ ok: true, result }), {
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
+    const driveId = await resolveDriveId(token);
+
     let result: unknown;
     switch (action) {
       case "status":
-        result = await status(token);
+        result = await status(token, driveId);
         break;
       case "ensureDataRoom":
-        result = await ensureDataRoom(token, args.practiceName);
+        result = await ensureDataRoom(token, driveId, args.practiceName);
         break;
       case "listDocuments":
-        result = await listDocuments(token, args.practiceName);
+        result = await listDocuments(token, driveId, args.practiceName);
         break;
       case "moveDocument":
-        result = await moveDocument(token, args.itemId, args.targetFolderId, args.newName);
+        result = await moveDocument(token, driveId, args.itemId, args.targetFolderId, args.newName);
         break;
       case "deltaSync":
-        result = await deltaSync(token, args.deltaLink);
+        result = await deltaSync(token, driveId, args.deltaLink);
         break;
       default:
         return new Response(JSON.stringify({ error: `unknown action: ${action}` }), {
