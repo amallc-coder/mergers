@@ -32,10 +32,21 @@ documents, auto-creating the category folders per deal, and moving/organizing fi
 | Entra app registered + client secret created | IT admin | ✅ done |
 | Graph permission `Sites.Selected` (Application) **admin-consented** | IT admin | ✅ done — the app token carries `roles: ["Sites.Selected"]` |
 | Azure secrets set in Supabase (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) | Nish | ✅ done |
-| Edge Function `sharepoint` deployed | Nish | ⚠️ v7 live (points at old root-site drive). New version that targets this site is in the repo, pending deploy. |
-| **Per-site `write` grant for the app on the M&A site** | **IT admin (or site admin via PnP)** | ⛔ **the one remaining blocker — Step 4** |
+| Edge Function `sharepoint` deployed | Nish | ✅ **v8 live** — resolves the M&A document library at runtime from the site ID |
+| **Per-site `write` grant for the app on the M&A site** | IT admin | ✅ **done** — the app reads and writes the M&A library |
+| End-to-end verified (`whoami` → `status` → `ensureDataRoom` → `listDocuments`) | — | ✅ **done 2026-06-27** |
 
-Once Step 4 lands, the app can list/create/move everything in this site's library.
+**The integration is LIVE.** The app authenticates app-only to Microsoft Graph, the
+`Sites.Selected` grant on the Merger & Acquisition site is in place, and a test data room
+(`Data Room - Dr. Stein`) with all 10 category folders was created in
+`/sites/MergerAcquisition/Shared Documents/M&A Diligence/` and read back successfully.
+
+> **Verification note:** from this environment, outbound egress to `*.supabase.co` is blocked
+> by policy, so the function is exercised server-side via the database's `pg_net` extension
+> (`select net.http_post(... '/functions/v1/sharepoint' ...)`, then read `net._http_response`).
+> Use `timeout_milliseconds := 30000` for `ensureDataRoom` — creating 12 folders exceeds the
+> 5 s default. A normal client (the app, or `curl` from a normal network) calls the same
+> endpoint directly.
 
 ## Architecture
 
@@ -53,7 +64,10 @@ The Azure secret lives only in the Edge Function. The browser never sees it.
 
 ---
 
-## Step 4 — Grant the app `write` on the Merger & Acquisition site  ← the blocker
+## Step 4 — Grant the app `write` on the Merger & Acquisition site  ✅ DONE
+
+> The IT admin applied this grant on 2026-06-27; the app now reads and writes the site.
+> Kept here as the record of how it was done / how to re-apply if the app is ever re-registered.
 
 `Sites.Selected` gives the app **zero** access until a specific site is granted to it.
 Someone whose identity carries the `Sites.FullControl.All` application permission (your IT
@@ -92,7 +106,7 @@ Grant-PnPAzureADAppSitePermission `
 (First-time PnP use may prompt `Register-PnPManagementShellAccess`, a one-time tenant consent
 for the PnP shell app.)
 
-## Step 5 — Deploy the site-aware Edge Function
+## Step 5 — Deploy the site-aware Edge Function  ✅ DONE (v8)
 
 The repo's `supabase/functions/sharepoint/index.ts` resolves the document library at runtime
 from the site ID, so it needs no drive ID hardcoded. Deploy it:
