@@ -24,6 +24,14 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// Microsoft Graph (shared app registration). Email send requires the Mail.Send
+// application permission + a sender mailbox; until those are in place, sends are
+// recorded as "queued" and a later flushOutbox pass delivers them.
+const AZURE_TENANT = Deno.env.get("AZURE_TENANT_ID") ?? "";
+const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID") ?? "";
+const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET") ?? "";
+const SENDER_MAILBOX = Deno.env.get("GRAPH_SENDER_MAILBOX") ?? "";
+
 const APP_KEY_SHA256 =
   Deno.env.get("APP_ACCESS_KEY_SHA256") ??
   "56b8ece9360067ca09c394436679972a0c52d69acd6252c1713391a8b79b2eaa";
@@ -117,6 +125,77 @@ async function insertRow(table: string, row: Record<string, unknown>): Promise<v
   if (!res.ok) throw new Error(`insert ${table} failed (${res.status}): ${await res.text()}`);
 }
 
+async function dbSelect(pathAndQuery: string): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    headers: { apikey: SERVICE_ROLE, Authorization: `Bearer ${SERVICE_ROLE}` },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`select ${pathAndQuery} failed (${res.status}): ${text}`);
+  return text ? JSON.parse(text) : [];
+}
+
+/** App-only Graph token (client credentials). */
+async function graphToken(): Promise<string> {
+  const body = new URLSearchParams({
+    client_id: AZURE_CLIENT_ID,
+    client_secret: AZURE_CLIENT_SECRET,
+    scope: "https://graph.microsoft.com/.default",
+    grant_type: "client_credentials",
+  });
+  const res = await fetch(`https://login.microsoftonline.com/${AZURE_TENANT}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) throw new Error(`graph token ${res.status}: ${await res.text()}`);
+  return (await res.json()).access_token as string;
+}
+
+/**
+ * Attempt to deliver one email via Graph sendMail. Returns the resulting status:
+ * - "sent"   on success
+ * - "queued" when delivery isn't possible yet (no Mail.Send grant / no sender
+ *            mailbox / token issue) — the row stays retryable for flushOutbox
+ * - "failed" on a hard, non-permission error
+ */
+async function deliverEmail(
+  token: string | null,
+  toEmail: string,
+  toName: string | undefined,
+  subject: string,
+  body: string,
+): Promise<{ status: "sent" | "queued" | "failed"; error: string | null }> {
+  if (!SENDER_MAILBOX) return { status: "queued", error: "Sender mailbox not configured yet." };
+  if (!toEmail) return { status: "failed", error: "No recipient address." };
+  try {
+    const t = token ?? (await graphToken());
+    const res = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SENDER_MAILBOX)}/sendMail`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: {
+            subject,
+            body: { contentType: "HTML", content: body },
+            toRecipients: [{ emailAddress: { address: toEmail, name: toName } }],
+          },
+          saveToSentItems: true,
+        }),
+      },
+    );
+    if (res.ok || res.status === 202) return { status: "sent", error: null };
+    const errText = await res.text();
+    // 401/403 → Mail.Send not granted yet: keep it queued for a later flush.
+    if (res.status === 401 || res.status === 403) {
+      return { status: "queued", error: `Mail.Send not granted yet (${res.status}).` };
+    }
+    return { status: "failed", error: `sendMail ${res.status}: ${errText.slice(0, 300)}` };
+  } catch (e) {
+    return { status: "queued", error: `send unavailable: ${String(e).slice(0, 200)}` };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
@@ -188,6 +267,69 @@ Deno.serve(async (req) => {
           summary: `Stage changed to ${stage}`,
         });
         return json({ ok: true, result: { id, stage, enteredAt: now } });
+      }
+      case "sendMail": {
+        // Compose + send (or queue) one email, logging it to communications.
+        const toEmail = String(args.toEmail ?? "");
+        const subject = String(args.subject ?? "");
+        const body = String(args.body ?? "");
+        if (!toEmail || !subject) return json({ ok: false, error: "toEmail and subject required" }, 400);
+        const toName = typeof args.toName === "string" ? args.toName : undefined;
+        const { status, error } = await deliverEmail(null, toEmail, toName, subject, body);
+        const row = {
+          transaction_id: args.transactionId ?? null,
+          contact_id: args.contactId ?? null,
+          to_email: toEmail,
+          to_name: toName ?? null,
+          subject,
+          body,
+          template_key: args.templateKey ?? null,
+          status,
+          error,
+          sent_at: status === "sent" ? new Date().toISOString() : null,
+          created_by: typeof args.actorName === "string" ? args.actorName : "System",
+        };
+        await insertRow("communications", row);
+        if (args.transactionId) {
+          await insertRow("audit_logs", {
+            transaction_id: args.transactionId,
+            actor_name: row.created_by,
+            action: "reminder_sent",
+            target: toEmail,
+            metadata: { subject, status, channel: "email" },
+          });
+        }
+        return json({ ok: true, result: { status, error } });
+      }
+      case "flushOutbox": {
+        // Retry every queued email — used after Mail.Send is granted (and can be
+        // wired to pg_cron). No-op (0 sent) until then.
+        const queued = await dbSelect(
+          "communications?status=eq.queued&select=id,to_email,to_name,subject,body&limit=100",
+        );
+        let token: string | null = null;
+        try {
+          token = SENDER_MAILBOX ? await graphToken() : null;
+        } catch {
+          token = null;
+        }
+        let sent = 0;
+        for (const m of queued) {
+          const { status, error } = await deliverEmail(
+            token,
+            String(m.to_email ?? ""),
+            (m.to_name as string) ?? undefined,
+            String(m.subject ?? ""),
+            String(m.body ?? ""),
+          );
+          await patch("communications", { id: String(m.id) }, {
+            status,
+            error,
+            sent_at: status === "sent" ? new Date().toISOString() : null,
+          });
+          if (status === "sent") sent++;
+        }
+        return json({ ok: true, result: { considered: queued.length, sent } });
       }
       default:
         return json({ ok: false, error: `unknown action: ${action}` }, 400);
