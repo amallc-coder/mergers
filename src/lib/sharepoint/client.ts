@@ -164,7 +164,8 @@ async function call<T>(action: string, args: Record<string, unknown>): Promise<T
 export const sharePoint = {
   whoami: () => call<WhoAmI>("whoami", {}),
   status: () => call<SharePointStatus>("status", {}),
-  ensureDataRoom: (practiceName: string) => call<EnsureDataRoomResult>("ensureDataRoom", { practiceName }),
+  ensureDataRoom: (practiceName: string, destRoot?: string) =>
+    call<EnsureDataRoomResult>("ensureDataRoom", { practiceName, destRoot }),
   listDocuments: (practiceName: string) =>
     call<{ dataRoomId?: string; files: SharePointFile[] }>("listDocuments", { practiceName }),
   moveDocument: (itemId: string, targetFolderId: string, newName?: string) =>

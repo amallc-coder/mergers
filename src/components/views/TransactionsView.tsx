@@ -8,10 +8,12 @@ import { useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith } from "@/lib/selectors";
 import { formatDate } from "@/lib/format";
 import { PipelineBoard } from "./PipelineBoard";
+import { NewTransactionModal } from "./NewTransactionModal";
 import { SourceBadge, txHref, ViewLoading } from "./shared";
 
 export function TransactionsView() {
   const [view, setView] = useState<"table" | "pipeline">("table");
+  const [showNew, setShowNew] = useState(false);
   const { data: summaries, loading, source } = useRepoData((repo) =>
     getTransactionSummariesWith(repo),
   );
@@ -22,11 +24,16 @@ export function TransactionsView() {
         title="Transactions"
         subtitle={summaries ? `${summaries.length} acquisition candidate(s)` : "Loading…"}
         action={
-          <button className="inline-flex items-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700">
+          <button
+            onClick={() => setShowNew(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          >
             <Plus size={16} /> New transaction
           </button>
         }
       />
+
+      {showNew && <NewTransactionModal onClose={() => setShowNew(false)} />}
 
       <div className="mb-3 flex items-center justify-between gap-2">
         <SourceBadge source={source} />
