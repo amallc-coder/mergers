@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowDown, ArrowUp } from "lucide-react";
-import { Card, CardHeader, DealScoreBadge, PageHeader } from "@/components/ui";
+import { Card, CardHeader, DealScoreBadge, InfoDot, PageHeader } from "@/components/ui";
 import { useData, useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith } from "@/lib/selectors";
 import { metricLookup } from "@/lib/domain/analytics";
@@ -181,12 +181,12 @@ export function KpisView() {
                     action={<DealScoreBadge score={c.s.deal.score} />}
                   />
                   <div className="grid grid-cols-3 gap-px bg-ink-100">
-                    <Metric label="T12 revenue" value={c.t12 !== undefined ? formatUSD(c.t12, { compact: true }) : "—"} />
-                    <Metric label="EBITDA" value={c.ebitda !== undefined ? formatUSD(c.ebitda, { compact: true }) : "—"} />
-                    <Metric label="EBITDA margin" value={c.margin !== undefined ? formatPercent(c.margin) : "—"} />
-                    <Metric label="Payroll % rev" value={c.payrollPct !== undefined ? formatPercent(c.payrollPct) : "—"} />
-                    <Metric label="Days in AR" value={c.daysAr !== undefined ? `${Math.round(c.daysAr)}d` : "—"} />
-                    <Metric label="Denial rate" value={c.denial !== undefined ? formatPercent(c.denial) : "—"} />
+                    <Metric label="T12 revenue" info={KPI_INFO.t12} value={c.t12 !== undefined ? formatUSD(c.t12, { compact: true }) : "—"} />
+                    <Metric label="EBITDA" info={KPI_INFO.ebitda} value={c.ebitda !== undefined ? formatUSD(c.ebitda, { compact: true }) : "—"} />
+                    <Metric label="EBITDA margin" info={KPI_INFO.margin} value={c.margin !== undefined ? formatPercent(c.margin) : "—"} />
+                    <Metric label="Payroll % rev" info={KPI_INFO.payroll} value={c.payrollPct !== undefined ? formatPercent(c.payrollPct) : "—"} />
+                    <Metric label="Days in AR" info={KPI_INFO.daysAr} value={c.daysAr !== undefined ? `${Math.round(c.daysAr)}d` : "—"} />
+                    <Metric label="Denial rate" info={KPI_INFO.denial} value={c.denial !== undefined ? formatPercent(c.denial) : "—"} />
                   </div>
                 </Card>
               ))}
@@ -198,10 +198,22 @@ export function KpisView() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+const KPI_INFO = {
+  t12: "Trailing-twelve-month net revenue (collections) — the practice's run-rate top line, read from its most recent P&L / income statement.",
+  ebitda: "Earnings before interest, taxes, depreciation & amortization — operating profit read from the P&L.",
+  margin: "EBITDA ÷ net revenue. Benchmark: strong ≥ 22%, weak ≤ 8%.",
+  payroll: "Total payroll expense ÷ net revenue. Benchmark: healthy ≤ 30%, elevated ≥ 45% (very low often means the figure is partial — flag for clarification).",
+  daysAr: "Total accounts-receivable balance ÷ (trailing revenue ÷ 365) — average days to collect. Benchmark: healthy ≤ 35, concerning ≥ 65.",
+  denial: "Denied claims ÷ total claims submitted. Benchmark: healthy ≤ 5%, concerning ≥ 12%.",
+} as const;
+
+function Metric({ label, value, info }: { label: string; value: string; info?: string }) {
   return (
     <div className="bg-panel px-4 py-3">
-      <p className="text-[11px] font-medium uppercase tracking-wide text-ink-400">{label}</p>
+      <p className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-ink-400">
+        {label}
+        {info && <InfoDot text={info} />}
+      </p>
       <p className="mt-0.5 text-lg font-semibold tabular-nums text-ink-900">{value}</p>
     </div>
   );

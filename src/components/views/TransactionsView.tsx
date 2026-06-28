@@ -13,7 +13,7 @@ import {
   RotateCcw,
   Table2,
 } from "lucide-react";
-import { Card, DealScoreBadge, PageHeader, ProgressBar, RiskBadge } from "@/components/ui";
+import { Card, DealScoreBadge, InfoDot, PageHeader, ProgressBar, RiskBadge } from "@/components/ui";
 import { useData, useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith, type TransactionSummary } from "@/lib/selectors";
 import { TERMINAL_STAGES } from "@/lib/domain/types";
@@ -145,21 +145,22 @@ export function TransactionsView() {
     }
   }
 
-  const Th = ({ label, k, align = "left", className = "" }: { label: string; k: SortKey; align?: "left" | "center" | "right"; className?: string }) => (
+  const Th = ({ label, k, align = "left", className = "", info }: { label: string; k: SortKey; align?: "left" | "center" | "right"; className?: string; info?: string }) => (
     <th className={`px-3 py-3 font-medium ${className}`}>
-      <button
-        onClick={() => toggleSort(k)}
-        className={`inline-flex items-center gap-1 hover:text-ink-800 ${
-          align === "right" ? "justify-end" : align === "center" ? "justify-center" : ""
-        } ${sortKey === k ? "text-ink-800" : ""}`}
-      >
-        {label}
-        {sortKey === k ? (
-          sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />
-        ) : (
-          <ArrowUpDown size={11} className="text-ink-300" />
-        )}
-      </button>
+      <span className={`inline-flex items-center gap-1 ${align === "center" ? "justify-center" : ""}`}>
+        <button
+          onClick={() => toggleSort(k)}
+          className={`inline-flex items-center gap-1 hover:text-ink-800 ${sortKey === k ? "text-ink-800" : ""}`}
+        >
+          {label}
+          {sortKey === k ? (
+            sortDir === "asc" ? <ArrowUp size={12} /> : <ArrowDown size={12} />
+          ) : (
+            <ArrowUpDown size={11} className="text-ink-300" />
+          )}
+        </button>
+        {info && <InfoDot text={info} />}
+      </span>
     </th>
   );
 
@@ -266,14 +267,14 @@ export function TransactionsView() {
             <table className="w-full min-w-[960px] text-left text-sm">
               <thead className="border-b border-ink-100 bg-ink-50 text-xs uppercase tracking-wide text-ink-400">
                 <tr>
-                  <Th label="Practice" k="practice" />
-                  <Th label="Stage" k="stage" />
-                  <Th label="Deal score" k="score" />
-                  <Th label="Risk" k="risk" />
-                  <Th label="Pre-signing" k="presigning" />
-                  <Th label="Gaps" k="gaps" className="text-center" align="center" />
-                  <Th label="Overdue" k="overdue" className="text-center" align="center" />
-                  <Th label="Last activity" k="activity" />
+                  <Th label="Practice" k="practice" info="The acquisition-target practice, with its specialty, state, and location/provider counts." />
+                  <Th label="Stage" k="stage" info="Current pipeline stage. Terminal stages (Signed/Closed, On Hold, Passed/Dead) move the deal to the Completed tab." />
+                  <Th label="Deal score" k="score" info="AI deal-health score (0–100) blending pre-signing completion, financial KPIs, risk flags, and critical gaps." />
+                  <Th label="Risk" k="risk" info="Overall risk level derived from the deal-health assessment (Low / Moderate / Elevated / High)." />
+                  <Th label="Pre-signing" k="presigning" info="Share of pre-signing diligence items received (received + N/A ÷ applicable)." />
+                  <Th label="Gaps" k="gaps" className="text-center" align="center" info="Critical pre-signing documents still outstanding." />
+                  <Th label="Overdue" k="overdue" className="text-center" align="center" info="Diligence requests past their due date." />
+                  <Th label="Last activity" k="activity" info="Most recent recorded activity on this deal." />
                   <th className="px-3 py-3" />
                 </tr>
               </thead>

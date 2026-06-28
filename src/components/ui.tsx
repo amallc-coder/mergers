@@ -22,6 +22,30 @@ const TONE_TEXT = {
 } as const;
 type Tone = keyof typeof TONE_TEXT;
 
+// ─────────────────────────── InfoDot ───────────────────────────
+/** A small "i" affordance that reveals a short description on hover/focus —
+ *  "what this is / how it's calculated". CSS-only tooltip (no JS state). */
+export function InfoDot({ text, className = "" }: { text: string; className?: string }) {
+  return (
+    <span className={cn("group/info relative inline-flex align-middle", className)}>
+      <span
+        tabIndex={0}
+        role="img"
+        aria-label={text}
+        className="inline-flex h-3.5 w-3.5 cursor-help items-center justify-center rounded-full border border-ink-200 text-[9px] leading-none text-ink-400 hover:border-ink-900 hover:text-ink-900 focus:outline-none focus:border-ink-900"
+      >
+        i
+      </span>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-1.5 hidden w-52 -translate-x-1/2 rounded-lg border border-ink-200 bg-panel px-2.5 py-1.5 text-[11px] font-normal normal-case leading-snug tracking-normal text-ink-700 shadow-pop group-hover/info:block group-focus-within/info:block"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
 // ─────────────────────────── Card ───────────────────────────
 
 export function Card({

@@ -164,6 +164,14 @@ async function dbUpsert(table: string, rows: Record<string, unknown>[], onConfli
   if (!res.ok) throw new Error(`db upsert ${table} (${res.status}): ${await res.text()}`);
 }
 
+async function dbDelete(pathAndQuery: string) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    method: "DELETE",
+    headers: { apikey: SERVICE_ROLE, Authorization: `Bearer ${SERVICE_ROLE}`, Prefer: "return=minimal" },
+  });
+  if (!res.ok) throw new Error(`db delete ${pathAndQuery} (${res.status}): ${await res.text()}`);
+}
+
 // Data-room category folder → the app's category_key enum. AMA files are filed
 // under "other"; Intake (un-triaged uploads) is skipped.
 const FOLDER_TO_CATEGORY: Record<string, string> = {
@@ -1327,10 +1335,18 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
 
   if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
   if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
-  if (ebitda) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
-  if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
-  if (ebitda && revForRatio && revForRatio.value > 0)
-    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", (ebitda.value / revForRatio.value) * 100, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, revForRatio.conf) * 0.95, true, -100, 100);
+
+  // EBITDA sanity: an implied margin above ~60% (or below ~-40%) almost always means
+  // the model grabbed gross profit / a wrong line (e.g. a pharmacy's COGS), so suppress
+  // both EBITDA and the margin rather than show an impossible figure.
+  const impliedMargin = ebitda && revForRatio && revForRatio.value > 0 ? (ebitda.value / revForRatio.value) * 100 : undefined;
+  const ebitdaPlausible = impliedMargin === undefined || (impliedMargin <= 60 && impliedMargin >= -40);
+  if (ebitda && ebitdaPlausible) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
+  if (ebitda && ebitdaPlausible && impliedMargin !== undefined)
+    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, revForRatio!.conf) * 0.95, true, -40, 60);
+  const adjMargin = adj && revForRatio && revForRatio.value > 0 ? (adj.value / revForRatio.value) * 100 : undefined;
+  if (adj && (adjMargin === undefined || (adjMargin <= 70 && adjMargin >= -40)))
+    add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
   if (payroll && revForRatio && revForRatio.value > 0)
     add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (payroll.value / revForRatio.value) * 100, payroll.period, payroll.srcId, Math.min(payroll.conf, revForRatio.conf) * 0.95, true, 0, 200);
 
@@ -1350,9 +1366,18 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
       add("yoy_revenue_growth", "YoY revenue growth", "finance_accounting", "percent", ((cur.value / prev.value) - 1) * 100, `${years[1]}->${years[0]}`, cur.srcId, Math.min(cur.conf, prev.conf) * 0.95, true, -100, 500);
   }
 
-  if (ar) add("total_ar", "Total AR", "revenue_cycle_billing", "USD", ar.value, ar.period, ar.srcId, ar.conf, false, 0);
-  if (arDays) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", arDays.value, arDays.period, arDays.srcId, arDays.conf, false, 0, 400);
-  else if (ar && t12 && t12.value > 0) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", ar.value / (t12.value / 365), ar.period, ar.srcId, Math.min(ar.conf, t12.conf) * 0.9, true, 0, 400);
+  // Total AR is only shown when there's a revenue figure to sanity-check it against and
+  // it doesn't exceed ~1.6x annual revenue (a larger value almost always means COGS /
+  // cumulative charges / a prose figure was misread, e.g. pharmacy purchases).
+  const arOk = !!ar && !!revForRatio && revForRatio.value > 0 && ar!.value <= 1.6 * revForRatio.value;
+  if (arOk) add("total_ar", "Total AR", "revenue_cycle_billing", "USD", ar!.value, ar!.period, ar!.srcId, ar!.conf, false, 0);
+  // Days in AR: a stated value inside a sane band, else derived from plausible AR + T12.
+  if (arDays && arDays.value >= 3 && arDays.value <= 250)
+    add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", arDays.value, arDays.period, arDays.srcId, arDays.conf, false, 3, 250);
+  else if (arOk && t12 && t12.value > 0) {
+    const d = ar!.value / (t12.value / 365);
+    if (d >= 3 && d <= 250) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", d, ar!.period, ar!.srcId, Math.min(ar!.conf, t12.conf) * 0.9, true, 3, 250);
+  }
   if (denial) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", denial.value, denial.period, denial.srcId, denial.conf, false, 0, 100);
   else if (denied && totalClaims && totalClaims.value > 0) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", (denied.value / totalClaims.value) * 100, denied.period, denied.srcId, Math.min(denied.conf, totalClaims.conf) * 0.9, true, 0, 100);
   if (charges && payments && charges.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (payments.value / charges.value) * 100, payments.period, payments.srcId, Math.min(charges.conf, payments.conf) * 0.95, true, 0, 200);
@@ -1420,6 +1445,9 @@ async function extractMetrics(
     `ai_extracted_metrics?transaction_id=eq.${txId}&source=eq.ai&metric_key=in.(${READING_KEYS.join(",")})` +
       `&select=metric_key,metric_value_numeric,period,confidence_score,source_document_id`,
   );
+  // Replace this transaction's consolidated headline rows so metrics that are no longer
+  // emitted (e.g. an implausible value now suppressed) don't linger from a prior run.
+  await dbDelete(`ai_extracted_metrics?transaction_id=eq.${txId}&period=eq.Consolidated&source=eq.ai`);
   const displayRows = consolidate(allReading).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
   if (displayRows.length) await dbUpsert("ai_extracted_metrics", displayRows, "transaction_id,metric_key,period");
 
