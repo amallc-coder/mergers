@@ -58,4 +58,33 @@ export const dataApi = {
       actorName,
       note,
     }),
+  createTransaction: (input: {
+    practiceName: string;
+    name?: string;
+    specialty?: string;
+    state?: string;
+    stage?: string;
+    actorName?: string;
+  }) => call<{ id: string }>("createTransaction", input),
+  patchTransaction: (transactionId: string, patch: Record<string, unknown>) =>
+    call<unknown>("patchTransaction", { transactionId, ...patch }),
+  addContact: (input: {
+    transactionId: string;
+    type?: "internal" | "external";
+    name: string;
+    email: string;
+    phone?: string;
+    role?: string;
+    isPrimary?: boolean;
+  }) => call<unknown>("addContact", input),
+  sendMail: (input: {
+    transactionId?: string;
+    contactId?: string;
+    toEmail: string;
+    toName?: string;
+    subject: string;
+    body: string;
+    templateKey?: string;
+    actorName?: string;
+  }) => call<{ status: string; error: string | null }>("sendMail", input),
 };

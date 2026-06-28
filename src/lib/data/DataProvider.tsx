@@ -20,8 +20,25 @@ import type { DiligenceRepository } from "./repository";
 import { seedSnapshot } from "./seed-snapshot";
 import { snapshotRepository } from "./snapshot";
 import { dataApi, isLiveBackend } from "./snapshot-client";
-import { hasAppKey } from "../sharepoint/client";
+import { hasAppKey, sharePoint, INTAKE_HOME } from "../sharepoint/client";
 import { DEFAULT_PIPELINE_STAGES, type PipelineStage } from "../domain/types";
+
+export interface NewTransactionInput {
+  practiceName: string;
+  name?: string;
+  specialty?: string;
+  state?: string;
+  stage?: string;
+  actorName?: string;
+  sellerName?: string;
+  sellerEmail?: string;
+}
+
+export interface CreateResult {
+  id: string;
+  sharePointFolderUrl?: string;
+  provisioningError?: string;
+}
 
 type Source = "seed" | "live";
 type Status = "idle" | "loading" | "ok" | "error";
@@ -39,6 +56,11 @@ interface DataContextValue {
   refresh: () => void;
   /** Move a deal to a new stage (live only); refreshes the snapshot after. */
   setStage: (transactionId: string, stage: string, actorName?: string) => Promise<void>;
+  /** Create a deal, then provision its SharePoint data room (live only). The
+   *  transaction is saved even if provisioning fails (provisioningError set). */
+  createTransaction: (input: NewTransactionInput) => Promise<CreateResult>;
+  /** Retry SharePoint provisioning for a transaction whose first attempt failed. */
+  provisionDataRoom: (transactionId: string, practiceName: string) => Promise<string>;
 }
 
 const seedSnap = seedSnapshot();
@@ -104,9 +126,62 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [source, refresh],
   );
 
+  const provisionDataRoom = useCallback(
+    async (transactionId: string, practiceName: string) => {
+      // Provision the data room under the M&A Diligence home, then store the URL.
+      const res = await sharePoint.ensureDataRoom(practiceName, INTAKE_HOME);
+      const url = res.dataRoom.webUrl;
+      await dataApi.patchTransaction(transactionId, { sharePointFolderUrl: url });
+      refresh();
+      return url;
+    },
+    [refresh],
+  );
+
+  const createTransaction = useCallback(
+    async (input: NewTransactionInput): Promise<CreateResult> => {
+      if (source !== "live") throw new Error("Unlock the live backend to create deals.");
+      const { id } = await dataApi.createTransaction({
+        practiceName: input.practiceName,
+        name: input.name,
+        specialty: input.specialty,
+        state: input.state,
+        stage: input.stage,
+        actorName: input.actorName,
+      });
+      // Attach the seller contact if provided (best-effort).
+      if (input.sellerEmail && input.sellerName) {
+        try {
+          await dataApi.addContact({
+            transactionId: id,
+            type: "external",
+            name: input.sellerName,
+            email: input.sellerEmail,
+            role: "Seller",
+            isPrimary: true,
+          });
+        } catch {
+          /* non-fatal */
+        }
+      }
+      // Provision the SharePoint data room. The deal is already saved, so a Graph
+      // failure is surfaced (with a retry path) rather than rolling anything back.
+      let sharePointFolderUrl: string | undefined;
+      let provisioningError: string | undefined;
+      try {
+        sharePointFolderUrl = await provisionDataRoom(id, input.practiceName);
+      } catch (e) {
+        provisioningError = e instanceof Error ? e.message : String(e);
+        refresh();
+      }
+      return { id, sharePointFolderUrl, provisioningError };
+    },
+    [source, provisionDataRoom, refresh],
+  );
+
   const value = useMemo<DataContextValue>(
-    () => ({ repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage }),
-    [repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage],
+    () => ({ repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage, createTransaction, provisionDataRoom }),
+    [repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage, createTransaction, provisionDataRoom],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

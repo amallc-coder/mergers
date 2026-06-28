@@ -238,6 +238,48 @@ Deno.serve(async (req) => {
         const result = await upsert("tasks", row);
         return json({ ok: true, result });
       }
+      case "createTransaction": {
+        // Feature 1: create a deal + its checklist atomically; returns the id.
+        // SharePoint provisioning is a separate client step (graceful failure).
+        const practice = String(args.practiceName ?? "").trim();
+        if (!practice) return json({ ok: false, error: "practiceName required" }, 400);
+        const id = await rpc("app_create_transaction", {
+          p_name: typeof args.name === "string" && args.name.trim() ? args.name.trim() : practice,
+          p_practice: practice,
+          p_specialty: args.specialty ?? null,
+          p_state: args.state ?? null,
+          p_stage: args.stage ?? "Prospect / Sourced",
+          p_actor: typeof args.actorName === "string" ? args.actorName : "System",
+        });
+        return json({ ok: true, result: { id } });
+      }
+      case "patchTransaction": {
+        const id = String(args.transactionId ?? "");
+        if (!id) return json({ ok: false, error: "transactionId required" }, 400);
+        const body: Record<string, unknown> = { last_activity_date: new Date().toISOString() };
+        if (args.sharePointFolderUrl !== undefined) body.sharepoint_folder_url = args.sharePointFolderUrl;
+        if (args.specialty !== undefined) body.specialty = args.specialty;
+        if (args.state !== undefined) body.state = args.state;
+        if (args.riskLevel !== undefined) body.risk_level = args.riskLevel;
+        if (args.locationsCount !== undefined) body.locations_count = args.locationsCount;
+        if (args.providersCount !== undefined) body.providers_count = args.providersCount;
+        const rows = await patch("transactions", { id }, body);
+        return json({ ok: true, result: rows });
+      }
+      case "addContact": {
+        const transactionId = String(args.transactionId ?? "");
+        if (!transactionId) return json({ ok: false, error: "transactionId required" }, 400);
+        const result = await upsert("transaction_contacts", {
+          transaction_id: transactionId,
+          type: args.type ?? "external",
+          name: args.name ?? "",
+          email: args.email ?? "",
+          phone: args.phone ?? null,
+          role: args.role ?? null,
+          is_primary: args.isPrimary === true,
+        });
+        return json({ ok: true, result });
+      }
       case "setStage": {
         // Feature 4: move a deal to a new pipeline stage, recording the change in
         // the stage history (for time-in-stage) and the audit log.
