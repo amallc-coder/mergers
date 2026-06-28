@@ -35,6 +35,9 @@ jobs:
           # is additionally protected by a team access passcode entered in the app.
           NEXT_PUBLIC_SUPABASE_URL: https://gyligrsjpvniupfvczqb.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5bGlncnNqcHZuaXVwZnZjenFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI1MTMxNjIsImV4cCI6MjA5ODA4OTE2Mn0.uhOENWyD5XmQYfbS34uzLxnNcb7Dt2gPEcS97Xk2p5A
+          # Read live application data at runtime from the gated `data` Edge
+          # Function (always-fresh). Falls back to seed until the passcode unlocks.
+          NEXT_PUBLIC_DATA_BACKEND: supabase
         run: npm run build
 
       - name: Publish to gh-pages
