@@ -131,6 +131,55 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// ── Supabase (service role) — write synced documents into the live DB ──────────
+// SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are auto-injected into every edge
+// function. The service role bypasses RLS; it never leaves this function.
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+async function dbGet(pathAndQuery: string): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    headers: { apikey: SERVICE_ROLE, Authorization: `Bearer ${SERVICE_ROLE}` },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`db get ${pathAndQuery} (${res.status}): ${text}`);
+  return text ? JSON.parse(text) : [];
+}
+
+async function dbUpsert(table: string, rows: Record<string, unknown>[], onConflict: string) {
+  if (rows.length === 0) return;
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SERVICE_ROLE,
+        Authorization: `Bearer ${SERVICE_ROLE}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify(rows),
+    },
+  );
+  if (!res.ok) throw new Error(`db upsert ${table} (${res.status}): ${await res.text()}`);
+}
+
+// Data-room category folder → the app's category_key enum. AMA files are filed
+// under "other"; Intake (un-triaged uploads) is skipped.
+const FOLDER_TO_CATEGORY: Record<string, string> = {
+  "01. Logins Passwords": "logins_passwords",
+  "02. Finance Accounting": "finance_accounting",
+  "03. Revenue Cycle Billing": "revenue_cycle_billing",
+  "04. Providers Credentialing": "providers_credentialing",
+  "05. Operations Clinical": "operations_clinical",
+  "06. HR Payroll": "hr_payroll",
+  "07. IT EMR Systems": "it_emr_systems",
+  "08. Legal Contracts Business": "legal_contracts_business",
+  "09. Other": "other",
+  "10. Unclassified Review Queue": "unclassified_review_queue",
+  "AMA Data Room": "other",
+};
+
 // ── Graph helpers ───────────────────────────────────────────────
 
 async function getToken(): Promise<string> {
@@ -380,6 +429,58 @@ async function listDataRooms(token: string, driveId: string) {
   }
   dataRooms.sort((a, b) => String(a.practiceName).localeCompare(String(b.practiceName)));
   return { rootFolder: ROOT_FOLDER || "(library root)", count: dataRooms.length, dataRooms };
+}
+
+/**
+ * Walk each data room's category folders and upsert one `documents` row per file
+ * into the live DB (service role), so the app's Data Room tabs, document counts,
+ * and recent-uploads feed reflect what's actually in SharePoint. Idempotent —
+ * keyed on the SharePoint item id.
+ */
+async function syncDocuments(token: string, driveId: string, opts: { practiceName?: string } = {}) {
+  const txRows = await dbGet("transactions?select=id,practice_name");
+  const txMap: Record<string, string> = {};
+  for (const t of txRows) txMap[String(t.practice_name)] = String(t.id);
+
+  const listed = await listDataRooms(token, driveId);
+  const dataRooms = (listed.dataRooms ?? []) as Record<string, unknown>[];
+  const targets = dataRooms.filter((d) => !opts.practiceName || d.practiceName === opts.practiceName);
+
+  let totalDocuments = 0;
+  const rooms: Record<string, unknown>[] = [];
+  for (const room of targets) {
+    const txId = txMap[String(room.practiceName)];
+    if (!txId) {
+      rooms.push({ practice: room.practiceName, skipped: "no matching transaction" });
+      continue;
+    }
+    const entries: Record<string, unknown>[] = [];
+    await walkTree(token, driveId, String(room.id), "", entries);
+    const rows: Record<string, unknown>[] = [];
+    for (const e of entries) {
+      if (e.type !== "file") continue;
+      const top = String(e.relPath).split("/")[0];
+      const category = FOLDER_TO_CATEGORY[top];
+      if (!category) continue; // Intake / unknown top-level → skip
+      rows.push({
+        transaction_id: txId,
+        category,
+        file_name: e.name,
+        mime_type: e.mimeType ?? null,
+        size_bytes: e.sizeBytes ?? null,
+        uploaded_by: "SharePoint",
+        uploaded_by_type: "external",
+        uploaded_at: e.lastModified ?? null,
+        sharepoint_file_id: e.id,
+        sharepoint_url: e.webUrl ?? null,
+        sharepoint_sync_status: "synced",
+      });
+    }
+    await dbUpsert("documents", rows, "sharepoint_file_id");
+    totalDocuments += rows.length;
+    rooms.push({ practice: room.practiceName, documents: rows.length });
+  }
+  return { processedRooms: targets.length, totalDocuments, rooms };
 }
 
 // ── AI classification (Claude Opus 4.8) ─────────────────────────
@@ -1016,6 +1117,9 @@ Deno.serve(async (req) => {
         break;
       case "organizeIntakes":
         result = await organizeIntakes(token, driveId, args.destRoot ?? INTAKE_HOME, args.limit ?? 25);
+        break;
+      case "syncDocuments":
+        result = await syncDocuments(token, driveId, { practiceName: args.practiceName });
         break;
       case "subscribe":
         result = await subscribeWebhook(token, driveId, args.notificationUrl);

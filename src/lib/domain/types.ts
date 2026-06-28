@@ -33,8 +33,39 @@ export const TRANSACTION_STAGES = [
 ] as const;
 export type TransactionStage = (typeof TRANSACTION_STAGES)[number];
 
-/** Stages that represent terminal / non-active pipeline states. */
-export const TERMINAL_STAGES: TransactionStage[] = ["Closed", "Paused", "Declined"];
+/** Stages that represent terminal / non-active pipeline states (legacy seed +
+ *  the configurable live pipeline labels). Stage values are config-driven now,
+ *  so this is a plain string list rather than the narrow enum. */
+export const TERMINAL_STAGES: string[] = [
+  "Closed", "Paused", "Declined",
+  "Signed / Closed", "On Hold", "Passed / Dead",
+];
+
+/** A configurable pipeline stage (see the pipeline_stages table / app_snapshot). */
+export interface PipelineStage {
+  key: string;
+  label: string;
+  sortOrder: number;
+  isTerminal: boolean;
+  automations: { action: string }[];
+}
+
+/** Default pipeline used in seed/sample mode; the live backend supplies its own
+ *  config from the pipeline_stages table. */
+export const DEFAULT_PIPELINE_STAGES: PipelineStage[] = [
+  { key: "prospect_sourced", label: "Prospect / Sourced", sortOrder: 1, isTerminal: false, automations: [] },
+  { key: "nda_sent", label: "NDA Sent", sortOrder: 2, isTerminal: false, automations: [{ action: "send_nda" }] },
+  { key: "nda_executed", label: "NDA Executed", sortOrder: 3, isTerminal: false, automations: [] },
+  { key: "data_requested", label: "Data Requested / Waiting on Data", sortOrder: 4, isTerminal: false, automations: [{ action: "request_documents" }] },
+  { key: "diligence_in_progress", label: "Diligence In Progress", sortOrder: 5, isTerminal: false, automations: [] },
+  { key: "loi_drafted", label: "LOI Drafted", sortOrder: 6, isTerminal: false, automations: [] },
+  { key: "loi_sent", label: "LOI Sent", sortOrder: 7, isTerminal: false, automations: [{ action: "schedule_followup" }] },
+  { key: "loi_executed", label: "LOI Executed", sortOrder: 8, isTerminal: false, automations: [] },
+  { key: "definitive_agreement", label: "Definitive Agreement / Final Contracting", sortOrder: 9, isTerminal: false, automations: [] },
+  { key: "signed_closed", label: "Signed / Closed", sortOrder: 10, isTerminal: true, automations: [] },
+  { key: "on_hold", label: "On Hold", sortOrder: 11, isTerminal: true, automations: [] },
+  { key: "passed_dead", label: "Passed / Dead", sortOrder: 12, isTerminal: true, automations: [] },
+];
 
 /** External-facing diligence request status (visible to the seller). */
 export const DILIGENCE_STATUSES = [
@@ -377,7 +408,8 @@ export interface ActivityEvent {
 }
 
 export interface StageRecord {
-  stage: TransactionStage;
+  /** Config-driven stage label (see pipeline_stages). */
+  stage: string;
   ownerId?: string;
   dueDate?: string;
   enteredAt?: string;
@@ -393,7 +425,10 @@ export interface Transaction {
   state: string;
   locationsCount: number;
   providersCount: number;
-  stage: TransactionStage;
+  /** Config-driven pipeline stage label (see pipeline_stages). */
+  stage: string;
+  /** When the deal entered its current stage (for time-in-stage). */
+  stageEnteredAt?: string;
   assignedCoordinatorId: string;
   internalDealOwnerId: string;
   externalPrimaryContactId?: string;

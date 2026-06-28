@@ -19,7 +19,8 @@ import {
   SharePointSyncPanel,
   TasksPanel,
 } from "@/components/transaction/panels";
-import { useRepoData } from "@/lib/data/DataProvider";
+import { useState } from "react";
+import { useData, useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionViewWith } from "@/lib/selectors";
 import { NOW } from "@/lib/data/seed";
 import { ViewLoading } from "./shared";
@@ -119,7 +120,7 @@ export function TransactionDetailView({ id }: { id: string }) {
                 .filter(Boolean)
                 .join(" · ")}
             </p>
-            <p className="mt-0.5 text-xs text-ink-400">Stage: {tx.stage}</p>
+            <StageControl transactionId={tx.id} stage={tx.stage} stageEnteredAt={tx.stageEnteredAt} />
           </div>
           <div className="flex items-center gap-2">
             {sellerLink ? (
@@ -151,6 +152,67 @@ export function TransactionDetailView({ id }: { id: string }) {
 
       <Tabs tabs={tabs} />
     </>
+  );
+}
+
+/** Stage selector + time-in-stage. Editable on the live backend; read-only in
+ *  sample mode. Persists via setStage (audit log + stage history). */
+function StageControl({
+  transactionId,
+  stage,
+  stageEnteredAt,
+}: {
+  transactionId: string;
+  stage: string;
+  stageEnteredAt?: string;
+}) {
+  const { pipelineStages, source, setStage } = useData();
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const live = source === "live";
+
+  const days = stageEnteredAt
+    ? Math.max(0, Math.floor((Date.now() - new Date(stageEnteredAt).getTime()) / 86_400_000))
+    : null;
+  const inStage = days === null ? null : days === 0 ? "today" : `${days}d in stage`;
+
+  async function onChange(next: string) {
+    setErr(null);
+    setSaving(true);
+    try {
+      await setStage(transactionId, next);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      <span className="text-xs text-ink-400">Stage:</span>
+      {live ? (
+        <select
+          value={stage}
+          disabled={saving}
+          onChange={(e) => void onChange(e.target.value)}
+          className="rounded-lg border border-ink-200 bg-panel px-2 py-1 text-xs font-medium text-ink-700"
+        >
+          {[...pipelineStages]
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+            .map((s) => (
+              <option key={s.key} value={s.label}>
+                {s.label}
+              </option>
+            ))}
+        </select>
+      ) : (
+        <span className="text-xs font-medium text-ink-700">{stage}</span>
+      )}
+      {inStage && <span className="text-xs text-ink-400">· {inStage}</span>}
+      {saving && <span className="text-xs text-ink-400">saving…</span>}
+      {err && <span className="text-xs text-amber-600">{err}</span>}
+    </div>
   );
 }
 

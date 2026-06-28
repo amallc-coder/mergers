@@ -3,11 +3,13 @@
  * live backends share one repository implementation (`snapshotRepository`).
  */
 import type { Snapshot } from "./snapshot";
+import { DEFAULT_PIPELINE_STAGES } from "../domain/types";
 import * as seed from "./seed";
 
 export function seedSnapshot(): Snapshot {
   return {
     org: seed.ORG,
+    pipelineStages: DEFAULT_PIPELINE_STAGES,
     users: seed.USERS,
     transactions: seed.TRANSACTIONS,
     contacts: seed.CONTACTS,
