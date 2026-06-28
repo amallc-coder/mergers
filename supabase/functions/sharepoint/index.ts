@@ -73,6 +73,17 @@ const REVIEW_FOLDER = "10. Unclassified Review Queue";
 // a subfolder created alongside the 10 diligence categories inside each data room.
 const AMA_FOLDER = "AMA Data Room";
 
+// Sellers upload here; the auto-organizer classifies and files anything dropped in.
+const INTAKE_FOLDER = "Intake";
+
+// The folder under which organized data rooms live (so the intake auto-organizer
+// knows where to look). Matches where the batch organize filed everything.
+const INTAKE_HOME = Deno.env.get("SHAREPOINT_INTAKE_HOME") ?? "M&A Diligence";
+
+// Shared secret echoed by Microsoft Graph change-notification calls (clientState).
+// Graph webhooks can't send the app passcode, so notifications are verified by this.
+const WEBHOOK_STATE = Deno.env.get("GRAPH_WEBHOOK_STATE") ?? APP_KEY_SHA256.slice(0, 24);
+
 // Guidance the classifier sees for each diligence category.
 const CATEGORY_GUIDE = [
   "01. Logins Passwords — login credentials, portal access, usernames/passwords, account/login screenshots",
@@ -210,6 +221,9 @@ async function ensureDataRoom(token: string, driveId: string, practiceName: stri
   // The AMA (acquirer) subfolder for files that belong to the parent company.
   const ama = await ensureChildFolder(token, driveId, dataRoom.id, AMA_FOLDER, `${drPath}/${AMA_FOLDER}`);
   folders[AMA_FOLDER] = { id: ama.id, webUrl: ama.webUrl };
+  // The seller upload folder; the auto-organizer files anything dropped here.
+  const intake = await ensureChildFolder(token, driveId, dataRoom.id, INTAKE_FOLDER, `${drPath}/${INTAKE_FOLDER}`);
+  folders[INTAKE_FOLDER] = { id: intake.id, webUrl: intake.webUrl };
   return { dataRoom: { id: dataRoom.id, name: dataRoomName, webUrl: dataRoom.webUrl }, folders };
 }
 
@@ -658,7 +672,7 @@ async function classifyDataRoom(
   const root = await getByPath(token, driveId, srcPath);
   if (!root) return { found: false, practiceName, sourcePath: srcPath };
 
-  const catSet = new Set([...CATEGORY_FOLDERS, AMA_FOLDER].map((c) => c.toLowerCase()));
+  const catSet = new Set([...CATEGORY_FOLDERS, AMA_FOLDER, INTAKE_FOLDER].map((c) => c.toLowerCase()));
 
   // Collect loose files (anything not already inside a category folder).
   const loose: { id: string; name: string; size: number; parentName: string }[] = [];
@@ -742,6 +756,75 @@ async function classifyDataRoom(
   });
 
   return { found: true, practiceName, sourcePath: srcPath, destPath, total, offset, limit, done: offset + limit >= total, dryRun, results };
+}
+
+/** List the "Data Room - <Practice>" folders directly under a base path. */
+async function listDataRoomItems(token: string, driveId: string, base: string) {
+  const rootItem = base ? await getByPath(token, driveId, base) : await graph(token, `/drives/${driveId}/root`);
+  if (!rootItem) return [] as { id: string; name: string; practiceName: string }[];
+  const rooms: { id: string; name: string; practiceName: string }[] = [];
+  let next: string | null = `/drives/${driveId}/items/${rootItem.id}/children?$top=200&$select=id,name,folder`;
+  while (next) {
+    const page = await graph(token, next);
+    for (const c of page.value ?? []) {
+      if (c.folder && /^Data Room\s*-\s*/i.test(c.name)) {
+        rooms.push({ id: c.id, name: c.name, practiceName: c.name.replace(/^Data Room\s*-\s*/i, "").trim() });
+      }
+    }
+    next = page["@odata.nextLink"] ?? null;
+  }
+  return rooms;
+}
+
+/**
+ * Auto-organize: for every data room under `destBase`, classify and file anything a
+ * seller dropped in its Intake folder into the right category. Skips empty intakes.
+ * This is what the upload webhook (and a manual trigger) call.
+ */
+async function organizeIntakes(token: string, driveId: string, destBase: string = INTAKE_HOME, limit = 25) {
+  const rooms = await listDataRoomItems(token, driveId, destBase);
+  const out: Record<string, unknown>[] = [];
+  for (const room of rooms) {
+    const intakePath = joinPath(destBase, `${room.name}/${INTAKE_FOLDER}`);
+    const intake = await getByPath(token, driveId, intakePath);
+    if (!intake) continue;
+    const ch = await graph(token, `/drives/${driveId}/items/${intake.id}/children?$top=1&$select=id,file`);
+    const hasFile = (ch?.value ?? []).some((c: Record<string, unknown>) => !!c.file || !!c.folder);
+    if (!hasFile) continue;
+    const res = await classifyDataRoom(token, driveId, room.practiceName, {
+      dryRun: false, offset: 0, limit, sourcePath: intakePath, destRoot: destBase,
+    });
+    out.push({ practiceName: room.practiceName, ...(res as Record<string, unknown>) });
+  }
+  return { home: destBase, processedRooms: out.length, rooms: out };
+}
+
+/** Create a Microsoft Graph change-notification subscription on the drive root. */
+async function subscribeWebhook(token: string, driveId: string, notificationUrl: string) {
+  const expiry = new Date(Date.now() + 1000 * 60 * 60 * 24 * 2); // ~2 days; renew before then
+  const body = {
+    changeType: "updated",
+    notificationUrl,
+    resource: `/drives/${driveId}/root`,
+    expirationDateTime: expiry.toISOString(),
+    clientState: WEBHOOK_STATE,
+  };
+  return await graph(token, `/subscriptions`, { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Extend an existing subscription's expiration. */
+async function renewWebhook(token: string, subscriptionId: string) {
+  const expiry = new Date(Date.now() + 1000 * 60 * 60 * 24 * 2);
+  return await graph(token, `/subscriptions/${subscriptionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ expirationDateTime: expiry.toISOString() }),
+  });
+}
+
+/** List active subscriptions (for diagnostics / renewal). */
+async function listSubscriptions(token: string) {
+  const r = await graph(token, `/subscriptions`);
+  return { subscriptions: r?.value ?? [] };
 }
 
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
@@ -831,8 +914,43 @@ async function whoami(token: string) {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+
+  // 1) Microsoft Graph subscription-validation handshake: echo the validationToken.
+  const url = new URL(req.url);
+  const validationToken = url.searchParams.get("validationToken");
+  if (validationToken) {
+    return new Response(validationToken, { status: 200, headers: { "Content-Type": "text/plain" } });
+  }
+
+  let payload: Record<string, unknown> = {};
   try {
-    const { action, ...args } = await req.json();
+    const raw = await req.text();
+    payload = raw ? JSON.parse(raw) : {};
+  } catch (_e) {
+    payload = {};
+  }
+
+  // 2) Graph change notification: body has a `value` array. Verify the shared
+  // clientState (Graph can't send the app passcode), ack fast, organize in background.
+  if (Array.isArray(payload.value)) {
+    const notes = payload.value as Record<string, unknown>[];
+    const ok = notes.length > 0 && notes.every((n) => n.clientState === WEBHOOK_STATE);
+    if (ok) {
+      const work = (async () => {
+        try {
+          const t = await getToken();
+          const d = await resolveDriveId(t);
+          await organizeIntakes(t, d);
+        } catch (_e) { /* best effort */ }
+      })();
+      try { (globalThis as Record<string, unknown> as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime?.waitUntil?.(work); } catch (_e) { /* ignore */ }
+    }
+    return new Response(JSON.stringify({ ok }), { status: 202, headers: { ...cors, "Content-Type": "application/json" } });
+  }
+
+  try {
+    // deno-lint-ignore no-explicit-any
+    const { action, ...args } = payload as any;
 
     // Access gate — reject anyone without the shared passcode (see APP_KEY_SHA256).
     const provided = typeof args.appKey === "string" ? args.appKey : "";
@@ -895,6 +1013,18 @@ Deno.serve(async (req) => {
         break;
       case "deleteItem":
         result = await deleteItem(token, driveId, args.itemId);
+        break;
+      case "organizeIntakes":
+        result = await organizeIntakes(token, driveId, args.destRoot ?? INTAKE_HOME, args.limit ?? 25);
+        break;
+      case "subscribe":
+        result = await subscribeWebhook(token, driveId, args.notificationUrl);
+        break;
+      case "renewSub":
+        result = await renewWebhook(token, args.subscriptionId);
+        break;
+      case "listSubscriptions":
+        result = await listSubscriptions(token);
         break;
       case "deltaSync":
         result = await deltaSync(token, driveId, args.deltaLink);
