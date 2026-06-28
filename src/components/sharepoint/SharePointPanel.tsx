@@ -17,11 +17,13 @@ import { Badge, Card, CardHeader, EmptyState } from "@/components/ui";
 import {
   clearAppKey,
   hasAppKey,
+  INTAKE_HOME,
   isSharePointConfigured,
   setAppKey,
   sharePoint,
   type SharePointFile,
   type SharePointStatus,
+  type TreeEntry,
 } from "@/lib/sharepoint/client";
 
 function formatBytes(n: number): string {
@@ -202,8 +204,161 @@ export function SharePointPanel({ variant = "full" }: { variant?: "full" | "stat
         )}
       </div>
 
-      {variant === "full" && connected && <FullControls />}
+      {variant === "full" && connected && (
+        <>
+          <LiveDataRooms />
+          <FullControls />
+        </>
+      )}
     </Card>
+  );
+}
+
+// ── Live data rooms (the real, organized deal list) ──────────────────
+// Reads the permanent "M&A Diligence" home at runtime (passcode-gated), so the
+// confidential practice names are never compiled into the public bundle.
+
+interface RoomSummary {
+  name: string;
+  practice: string;
+  webUrl?: string;
+  files: number;
+  review: number;
+  ama: number;
+  intake: number;
+}
+
+function LiveDataRooms() {
+  const [state, setState] = useState<Async>("idle");
+  const [rooms, setRooms] = useState<RoomSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [organizing, setOrganizing] = useState(false);
+  const [organizeMsg, setOrganizeMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setState("loading");
+    setError(null);
+    try {
+      const tree = await sharePoint.listTree(INTAKE_HOME);
+      const entries: TreeEntry[] = tree.entries ?? [];
+      const map = new Map<string, RoomSummary>();
+      for (const e of entries) {
+        // Top-level "Data Room - X" folders under the home (skip the staging subtree).
+        const m = /^(Data Room\s*-\s*(.+?))\//.exec(e.relPath + (e.type === "folder" ? "/" : ""));
+        if (!m) continue;
+        const folder = m[1];
+        const practice = m[2].split("/")[0].trim();
+        if (!map.has(folder)) {
+          map.set(folder, { name: folder, practice, files: 0, review: 0, ama: 0, intake: 0 });
+        }
+        const r = map.get(folder)!;
+        if (e.type === "folder" && e.relPath === folder && e.webUrl) r.webUrl = e.webUrl;
+        if (e.type === "file") {
+          r.files += 1;
+          if (e.relPath.includes("/10. Unclassified Review Queue/")) r.review += 1;
+          if (e.relPath.includes("/AMA Data Room/")) r.ama += 1;
+          if (e.relPath.includes("/Intake/")) r.intake += 1;
+        }
+      }
+      const list = [...map.values()].sort((a, b) => a.practice.localeCompare(b.practice));
+      setRooms(list);
+      setState("ok");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const organize = useCallback(async () => {
+    setOrganizing(true);
+    setOrganizeMsg(null);
+    try {
+      const r = await sharePoint.organizeIntakes();
+      setOrganizeMsg(
+        r.processedRooms === 0
+          ? "Nothing waiting in any Intake folder."
+          : `Organized intake uploads for ${r.processedRooms} data room(s).`,
+      );
+      await load();
+    } catch (e) {
+      setOrganizeMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOrganizing(false);
+    }
+  }, [load]);
+
+  const totalFiles = rooms.reduce((n, r) => n + r.files, 0);
+
+  return (
+    <div className="border-b border-ink-100 px-5 py-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-ink-800">
+          Data rooms{" "}
+          {state === "ok" && (
+            <span className="font-normal text-ink-500">
+              · {rooms.length} practices · {totalFiles} files
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button className="btn btn-ghost" onClick={load} disabled={state === "loading"} title="Refresh from SharePoint">
+            <RefreshCw size={14} className={state === "loading" ? "animate-spin" : ""} /> Refresh
+          </button>
+          <button className="btn btn-secondary" onClick={organize} disabled={organizing} title="Classify & file anything sitting in Intake folders">
+            {organizing ? <Loader2 size={14} className="animate-spin" /> : <FolderPlus size={14} />} Organize intake
+          </button>
+        </div>
+      </div>
+
+      {organizeMsg && <p className="mb-2 text-xs text-brand-700">{organizeMsg}</p>}
+
+      {state === "loading" && (
+        <p className="text-sm text-ink-400">
+          <Loader2 size={14} className="mr-2 inline animate-spin" /> Loading data rooms…
+        </p>
+      )}
+      {state === "error" && (
+        <div className="flex items-start gap-2 text-sm text-rust-600">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" /> {error}
+        </div>
+      )}
+      {state === "ok" && rooms.length === 0 && (
+        <EmptyState title="No data rooms yet" hint={`Nothing found under "${INTAKE_HOME}".`} />
+      )}
+      {state === "ok" && rooms.length > 0 && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {rooms.map((r) => (
+            <div key={r.name} className="flex items-center gap-2 rounded-lg border border-ink-200 px-3 py-2">
+              <FolderPlus size={15} className="shrink-0 text-ink-400" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-ink-800">{r.practice}</div>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs text-ink-500">
+                  <span>{r.files} files</span>
+                  {r.review > 0 && <Badge className="badge badge-rust">{r.review} review</Badge>}
+                  {r.ama > 0 && <Badge className="badge badge-neutral">{r.ama} AMA</Badge>}
+                  {r.intake > 0 && <Badge className="badge badge-sage">{r.intake} intake</Badge>}
+                </div>
+              </div>
+              {r.webUrl && (
+                <a
+                  href={r.webUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 text-brand-600 hover:text-brand-700"
+                  title="Open in SharePoint"
+                >
+                  <ExternalLink size={15} />
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
