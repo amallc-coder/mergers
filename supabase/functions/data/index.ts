@@ -102,6 +102,21 @@ async function upsert(table: string, row: Record<string, unknown>): Promise<unkn
   return text ? JSON.parse(text) : null;
 }
 
+/** Plain insert (no upsert) via PostgREST. */
+async function insertRow(table: string, row: Record<string, unknown>): Promise<void> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST",
+    headers: {
+      apikey: SERVICE_ROLE,
+      Authorization: `Bearer ${SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify(row),
+  });
+  if (!res.ok) throw new Error(`insert ${table} failed (${res.status}): ${await res.text()}`);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
@@ -143,6 +158,36 @@ Deno.serve(async (req) => {
         const row = (args.task ?? {}) as Record<string, unknown>;
         const result = await upsert("tasks", row);
         return json({ ok: true, result });
+      }
+      case "setStage": {
+        // Feature 4: move a deal to a new pipeline stage, recording the change in
+        // the stage history (for time-in-stage) and the audit log.
+        const id = String(args.transactionId ?? "");
+        const stage = String(args.stage ?? "");
+        if (!id || !stage) return json({ ok: false, error: "transactionId and stage required" }, 400);
+        const now = new Date().toISOString();
+        const actorName = typeof args.actorName === "string" ? args.actorName : "System";
+        await patch("transactions", { id }, { stage, last_activity_date: now });
+        await insertRow("transaction_stages", {
+          transaction_id: id,
+          stage,
+          entered_at: now,
+          notes: typeof args.note === "string" ? args.note : null,
+        });
+        await insertRow("audit_logs", {
+          transaction_id: id,
+          actor_name: actorName,
+          action: "stage_changed",
+          target: stage,
+          metadata: { via: "app" },
+        });
+        await insertRow("activity_events", {
+          transaction_id: id,
+          type: "stage_changed",
+          actor_name: actorName,
+          summary: `Stage changed to ${stage}`,
+        });
+        return json({ ok: true, result: { id, stage, enteredAt: now } });
       }
       default:
         return json({ ok: false, error: `unknown action: ${action}` }, 400);
