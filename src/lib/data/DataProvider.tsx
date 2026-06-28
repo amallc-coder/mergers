@@ -99,3 +99,38 @@ export function useData(): DataContextValue {
 export function useRepo(): DiligenceRepository {
   return useData().repo;
 }
+
+/**
+ * Run an async loader against the active repository, re-running whenever the
+ * data source changes (seed → live after the passcode unlocks). The `loader`
+ * should be a stable closure over the repo only; it is intentionally not in the
+ * dependency list (it is recreated each render).
+ */
+export function useRepoData<T>(
+  loader: (repo: DiligenceRepository) => Promise<T>,
+): { data: T | null; loading: boolean; source: Source } {
+  const { repo, source } = useData();
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.resolve(loader(repo))
+      .then((d) => {
+        if (!cancelled) {
+          setData(d);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo]);
+
+  return { data, loading, source };
+}
