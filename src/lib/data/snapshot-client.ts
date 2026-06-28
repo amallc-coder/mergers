@@ -69,14 +69,23 @@ export const dataApi = {
   patchTransaction: (transactionId: string, patch: Record<string, unknown>) =>
     call<unknown>("patchTransaction", { transactionId, ...patch }),
   addContact: (input: {
-    transactionId: string;
-    type?: "internal" | "external";
+    transactionId?: string;
+    type?: string;
     name: string;
     email: string;
     phone?: string;
     role?: string;
     isPrimary?: boolean;
-  }) => call<unknown>("addContact", input),
+    functionalRoles?: string[];
+  }) => call<{ id: string }>("addContact", input),
+  updateContact: (contactId: string, patch: Record<string, unknown>) =>
+    call<unknown>("updateContact", { contactId, ...patch }),
+  linkContact: (contactId: string, transactionId: string, role?: string, isPrimary?: boolean) =>
+    call<unknown>("linkContact", { contactId, transactionId, role, isPrimary }),
+  unlinkContact: (contactId: string, transactionId: string) =>
+    call<unknown>("unlinkContact", { contactId, transactionId }),
+  setAlertRouting: (category: string, roles: string[]) =>
+    call<unknown>("setAlertRouting", { category, roles }),
   sendMail: (input: {
     transactionId?: string;
     contactId?: string;

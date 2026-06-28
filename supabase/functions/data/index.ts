@@ -134,6 +134,17 @@ async function dbSelect(pathAndQuery: string): Promise<Record<string, unknown>[]
   return text ? JSON.parse(text) : [];
 }
 
+async function del(table: string, match: Record<string, string>): Promise<void> {
+  const qs = Object.entries(match)
+    .map(([k, v]) => `${encodeURIComponent(k)}=eq.${encodeURIComponent(v)}`)
+    .join("&");
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${qs}`, {
+    method: "DELETE",
+    headers: { apikey: SERVICE_ROLE, Authorization: `Bearer ${SERVICE_ROLE}`, Prefer: "return=minimal" },
+  });
+  if (!res.ok) throw new Error(`delete ${table} failed (${res.status}): ${await res.text()}`);
+}
+
 /** App-only Graph token (client credentials). */
 async function graphToken(): Promise<string> {
   const body = new URLSearchParams({
@@ -267,17 +278,54 @@ Deno.serve(async (req) => {
         return json({ ok: true, result: rows });
       }
       case "addContact": {
-        const transactionId = String(args.transactionId ?? "");
-        if (!transactionId) return json({ ok: false, error: "transactionId required" }, 400);
-        const result = await upsert("transaction_contacts", {
-          transaction_id: transactionId,
-          type: args.type ?? "external",
-          name: args.name ?? "",
-          email: args.email ?? "",
-          phone: args.phone ?? null,
-          role: args.role ?? null,
-          is_primary: args.isPrimary === true,
+        // Upsert a global contact and (optionally) link it to a transaction.
+        const id = await rpc("app_add_contact", {
+          p_transaction_id: args.transactionId ?? null,
+          p_type: args.type ?? "external",
+          p_name: args.name ?? "",
+          p_email: args.email ?? "",
+          p_phone: args.phone ?? null,
+          p_role: args.role ?? null,
+          p_is_primary: args.isPrimary === true,
+          p_functional_roles: args.functionalRoles ?? [],
         });
+        return json({ ok: true, result: { id } });
+      }
+      case "updateContact": {
+        const id = String(args.contactId ?? "");
+        if (!id) return json({ ok: false, error: "contactId required" }, 400);
+        const body: Record<string, unknown> = {};
+        if (args.name !== undefined) body.name = args.name;
+        if (args.email !== undefined) body.email = args.email;
+        if (args.phone !== undefined) body.phone = args.phone;
+        if (args.title !== undefined) body.title = args.title;
+        if (args.functionalRoles !== undefined) body.functional_roles = args.functionalRoles;
+        const rows = await patch("contacts", { id }, body);
+        return json({ ok: true, result: rows });
+      }
+      case "linkContact": {
+        const contactId = String(args.contactId ?? "");
+        const transactionId = String(args.transactionId ?? "");
+        if (!contactId || !transactionId) return json({ ok: false, error: "contactId and transactionId required" }, 400);
+        const result = await upsert("contact_links", {
+          contact_id: contactId,
+          transaction_id: transactionId,
+          is_primary: args.isPrimary === true,
+          role_on_deal: args.role ?? null,
+        });
+        return json({ ok: true, result });
+      }
+      case "unlinkContact": {
+        const contactId = String(args.contactId ?? "");
+        const transactionId = String(args.transactionId ?? "");
+        if (!contactId || !transactionId) return json({ ok: false, error: "contactId and transactionId required" }, 400);
+        await del("contact_links", { contact_id: contactId, transaction_id: transactionId });
+        return json({ ok: true, result: { unlinked: true } });
+      }
+      case "setAlertRouting": {
+        const category = String(args.category ?? "");
+        if (!category) return json({ ok: false, error: "category required" }, 400);
+        const result = await upsert("alert_routing", { category, roles: args.roles ?? [] });
         return json({ ok: true, result });
       }
       case "setStage": {
