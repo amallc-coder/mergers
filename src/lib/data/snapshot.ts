@@ -10,12 +10,16 @@
 
 import type {
   ActivityEvent,
+  AlertRoute,
   Comment,
+  Communication,
+  ContactLink,
   DiligenceRequestItem,
   Document,
   ExtractedMetric,
   Meeting,
   Organization,
+  Person,
   PipelineStage,
   RiskFlag,
   SellerPortalUser,
@@ -29,6 +33,10 @@ import type { DiligenceRepository, TransactionBundle } from "./repository";
 export interface Snapshot {
   org: Organization;
   pipelineStages?: PipelineStage[];
+  people?: Person[];
+  contactLinks?: ContactLink[];
+  communications?: Communication[];
+  alertRouting?: AlertRoute[];
   users: User[];
   transactions: Transaction[];
   contacts: TransactionContact[];

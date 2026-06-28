@@ -50,6 +50,51 @@ export interface PipelineStage {
   automations: { action: string }[];
 }
 
+/** Feature 3 — global contact (person) with a many-to-many link to deals. */
+export interface Person {
+  id: string;
+  type: string; // internal | external | seller
+  name: string;
+  email: string;
+  phone?: string;
+  title?: string;
+  functionalRoles: string[];
+  createdAt: string;
+}
+export interface ContactLink {
+  contactId: string;
+  transactionId: string;
+  isPrimary: boolean;
+  roleOnDeal?: string;
+}
+export interface Communication {
+  id: string;
+  transactionId?: string;
+  contactId?: string;
+  toEmail?: string;
+  toName?: string;
+  subject?: string;
+  templateKey?: string;
+  status: string; // queued | sent | failed | skipped
+  error?: string;
+  sentAt?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+export interface AlertRoute {
+  category: string;
+  roles: string[];
+}
+/** Functional roles internal contacts can hold (drives role->category alerting). */
+export const FUNCTIONAL_ROLES = [
+  "Finance",
+  "Operations",
+  "Legal",
+  "HR",
+  "Executive Leadership",
+  "M&A Coordinator",
+];
+
 /** Default pipeline used in seed/sample mode; the live backend supplies its own
  *  config from the pipeline_stages table. */
 export const DEFAULT_PIPELINE_STAGES: PipelineStage[] = [

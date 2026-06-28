@@ -21,7 +21,14 @@ import { seedSnapshot } from "./seed-snapshot";
 import { snapshotRepository } from "./snapshot";
 import { dataApi, isLiveBackend } from "./snapshot-client";
 import { hasAppKey, sharePoint, INTAKE_HOME } from "../sharepoint/client";
-import { DEFAULT_PIPELINE_STAGES, type PipelineStage } from "../domain/types";
+import {
+  DEFAULT_PIPELINE_STAGES,
+  type AlertRoute,
+  type Communication,
+  type ContactLink,
+  type Person,
+  type PipelineStage,
+} from "../domain/types";
 
 export interface NewTransactionInput {
   practiceName: string;
@@ -50,6 +57,11 @@ interface DataContextValue {
   error: string | null;
   /** The configurable pipeline stages (live config, or the seed default). */
   pipelineStages: PipelineStage[];
+  /** Feature 3 — global contacts, their deal links, comms log, alert routing. */
+  people: Person[];
+  contactLinks: ContactLink[];
+  communications: Communication[];
+  alertRouting: AlertRoute[];
   /** True when a live backend is configured for this build. */
   liveConfigured: boolean;
   /** Re-fetch the live snapshot (no-op when not live). */
@@ -61,6 +73,20 @@ interface DataContextValue {
   createTransaction: (input: NewTransactionInput) => Promise<CreateResult>;
   /** Retry SharePoint provisioning for a transaction whose first attempt failed. */
   provisionDataRoom: (transactionId: string, practiceName: string) => Promise<string>;
+  /** Contacts (live only). All refresh the snapshot after. */
+  addContact: (input: {
+    transactionId?: string;
+    type?: string;
+    name: string;
+    email: string;
+    phone?: string;
+    role?: string;
+    isPrimary?: boolean;
+    functionalRoles?: string[];
+  }) => Promise<void>;
+  updateContact: (contactId: string, patch: Record<string, unknown>) => Promise<void>;
+  linkContact: (contactId: string, transactionId: string, role?: string) => Promise<void>;
+  unlinkContact: (contactId: string, transactionId: string) => Promise<void>;
 }
 
 const seedSnap = seedSnapshot();
@@ -77,6 +103,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>(
     seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES,
   );
+  const [people, setPeople] = useState<Person[]>(seedSnap.people ?? []);
+  const [contactLinks, setContactLinks] = useState<ContactLink[]>(seedSnap.contactLinks ?? []);
+  const [communications, setCommunications] = useState<Communication[]>(seedSnap.communications ?? []);
+  const [alertRouting, setAlertRouting] = useState<AlertRoute[]>(seedSnap.alertRouting ?? []);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
@@ -86,6 +116,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setSource("seed");
       setRepo(seedRepo);
       setPipelineStages(seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES);
+      setPeople(seedSnap.people ?? []);
+      setContactLinks(seedSnap.contactLinks ?? []);
+      setCommunications(seedSnap.communications ?? []);
+      setAlertRouting(seedSnap.alertRouting ?? []);
       setStatus("idle");
       return;
     }
@@ -100,6 +134,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setPipelineStages(
           snap.pipelineStages?.length ? snap.pipelineStages : DEFAULT_PIPELINE_STAGES,
         );
+        setPeople(snap.people ?? []);
+        setContactLinks(snap.contactLinks ?? []);
+        setCommunications(snap.communications ?? []);
+        setAlertRouting(snap.alertRouting ?? []);
         setSource("live");
         setStatus("ok");
       })
@@ -179,9 +217,56 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [source, provisionDataRoom, refresh],
   );
 
+  const requireLive = useCallback(() => {
+    if (source !== "live") throw new Error("Unlock the live backend to make changes.");
+  }, [source]);
+
+  const addContact = useCallback(
+    async (input: Parameters<DataContextValue["addContact"]>[0]) => {
+      requireLive();
+      await dataApi.addContact(input);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const updateContact = useCallback(
+    async (contactId: string, patch: Record<string, unknown>) => {
+      requireLive();
+      await dataApi.updateContact(contactId, patch);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const linkContact = useCallback(
+    async (contactId: string, transactionId: string, role?: string) => {
+      requireLive();
+      await dataApi.linkContact(contactId, transactionId, role);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const unlinkContact = useCallback(
+    async (contactId: string, transactionId: string) => {
+      requireLive();
+      await dataApi.unlinkContact(contactId, transactionId);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+
   const value = useMemo<DataContextValue>(
-    () => ({ repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage, createTransaction, provisionDataRoom }),
-    [repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage, createTransaction, provisionDataRoom],
+    () => ({
+      repo, source, status, error, pipelineStages,
+      people, contactLinks, communications, alertRouting,
+      liveConfigured, refresh, setStage, createTransaction, provisionDataRoom,
+      addContact, updateContact, linkContact, unlinkContact,
+    }),
+    [
+      repo, source, status, error, pipelineStages,
+      people, contactLinks, communications, alertRouting,
+      liveConfigured, refresh, setStage, createTransaction, provisionDataRoom,
+      addContact, updateContact, linkContact, unlinkContact,
+    ],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
