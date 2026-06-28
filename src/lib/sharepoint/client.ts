@@ -2,9 +2,14 @@
  * Frontend client for the SharePoint Edge Function.
  *
  * Calls the Supabase Edge Function `sharepoint` (which holds the Azure secret and
- * talks to Microsoft Graph). The browser sends the user's Supabase access token;
- * Supabase verifies it before the function runs. No Microsoft credentials ever
- * reach the browser.
+ * talks to Microsoft Graph). No Microsoft credentials ever reach the browser.
+ *
+ * Auth model (static public site, no Supabase Auth):
+ *  - The Supabase anon key authenticates the request to the Edge platform
+ *    (`verify_jwt` accepts it). It is publishable and compiled into the bundle.
+ *  - A team **access passcode** is additionally required by the function. The user
+ *    enters it once in the app; it is kept in localStorage and sent in the request
+ *    body as `appKey`. Only its SHA-256 lives in the function — never the bundle.
  *
  * Configure via env: NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY.
  */
@@ -12,11 +17,28 @@
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
+const APP_KEY_STORAGE = "mergers.sharepoint.appkey.v1";
+
 export interface SharePointStatus {
   connected: boolean;
+  siteId: string;
+  driveId: string;
   driveName?: string;
+  driveWebUrl?: string;
   rootFolder: string;
   rootFolderExists: boolean;
+}
+
+export interface WhoAmI {
+  appid: string | null;
+  appDisplayName: string | null;
+  roles: string[];
+  tenant: string | null;
+  audience: string | null;
+  siteId: string;
+  resolvedDriveId: string | null;
+  driveName: string | null;
+  driveError: string | null;
 }
 
 export interface SharePointFile {
@@ -46,38 +68,86 @@ export interface DeltaChange {
   parentPath?: string;
 }
 
+/** True when the Supabase env is present (the build was given the URL + anon key). */
 export function isSharePointConfigured(): boolean {
   return !!SUPABASE_URL && !!ANON_KEY;
 }
 
-async function call<T>(action: string, args: Record<string, unknown>, accessToken: string): Promise<T> {
-  if (!SUPABASE_URL || !ANON_KEY) throw new Error("SharePoint not configured (set NEXT_PUBLIC_SUPABASE_* env)");
+// ── Access passcode (kept in localStorage, never in the bundle) ──────────────
+
+export function getAppKey(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(APP_KEY_STORAGE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setAppKey(key: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(APP_KEY_STORAGE, key.trim());
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearAppKey(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(APP_KEY_STORAGE);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function hasAppKey(): boolean {
+  return getAppKey().length > 0;
+}
+
+// ── Transport ────────────────────────────────────────────────────────────────
+
+async function call<T>(action: string, args: Record<string, unknown>): Promise<T> {
+  if (!SUPABASE_URL || !ANON_KEY) {
+    throw new Error("SharePoint is not configured (missing NEXT_PUBLIC_SUPABASE_* env).");
+  }
+  const appKey = getAppKey();
+  if (!appKey) throw new Error("Locked: enter the SharePoint access passcode to continue.");
+
   const res = await fetch(`${SUPABASE_URL}/functions/v1/sharepoint`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: ANON_KEY,
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${ANON_KEY}`,
     },
-    body: JSON.stringify({ action, ...args }),
+    body: JSON.stringify({ action, appKey, ...args }),
   });
-  const json = await res.json();
-  if (!res.ok || !json.ok) throw new Error(json.error ?? `sharepoint ${action} failed (${res.status})`);
+
+  let json: { ok?: boolean; result?: unknown; error?: string };
+  try {
+    json = await res.json();
+  } catch {
+    throw new Error(`SharePoint ${action} failed (${res.status})`);
+  }
+  if (res.status === 401) throw new Error("Access passcode rejected. Re-enter it to unlock.");
+  if (!res.ok || !json.ok) throw new Error(json.error ?? `SharePoint ${action} failed (${res.status})`);
   return json.result as T;
 }
 
 export const sharePoint = {
-  status: (token: string) => call<SharePointStatus>("status", {}, token),
-  ensureDataRoom: (practiceName: string, token: string) =>
-    call<EnsureDataRoomResult>("ensureDataRoom", { practiceName }, token),
-  listDocuments: (practiceName: string, token: string) =>
-    call<{ dataRoomId?: string; files: SharePointFile[] }>("listDocuments", { practiceName }, token),
-  moveDocument: (itemId: string, targetFolderId: string, token: string, newName?: string) =>
-    call<{ id: string; name: string; webUrl: string; parentId: string }>(
-      "moveDocument",
-      { itemId, targetFolderId, newName },
-      token,
-    ),
-  deltaSync: (token: string, deltaLink?: string) =>
-    call<{ changes: DeltaChange[]; deltaLink: string | null }>("deltaSync", { deltaLink }, token),
+  whoami: () => call<WhoAmI>("whoami", {}),
+  status: () => call<SharePointStatus>("status", {}),
+  ensureDataRoom: (practiceName: string) => call<EnsureDataRoomResult>("ensureDataRoom", { practiceName }),
+  listDocuments: (practiceName: string) =>
+    call<{ dataRoomId?: string; files: SharePointFile[] }>("listDocuments", { practiceName }),
+  moveDocument: (itemId: string, targetFolderId: string, newName?: string) =>
+    call<{ id: string; name: string; webUrl: string; parentId: string }>("moveDocument", {
+      itemId,
+      targetFolderId,
+      newName,
+    }),
+  deltaSync: (deltaLink?: string) =>
+    call<{ changes: DeltaChange[]; deltaLink: string | null }>("deltaSync", { deltaLink }),
 };

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { FolderTree, ExternalLink } from "lucide-react";
 import { Card, PageHeader, ProgressBar } from "@/components/ui";
+import { SharePointPanel } from "@/components/sharepoint/SharePointPanel";
 import { getRepository } from "@/lib/data/repository";
 import { getTransactionSummaries } from "@/lib/selectors";
 
@@ -14,6 +15,12 @@ export default async function DataRoomsPage() {
   return (
     <>
       <PageHeader title="Data Rooms" subtitle="Auto-generated, SharePoint-synced data rooms per transaction" />
+
+      {/* Live SharePoint: create/sync data rooms and browse real files. */}
+      <div className="mb-6">
+        <SharePointPanel />
+      </div>
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {summaries.map((s, idx) => (
           <Card key={s.transaction.id} className="p-5">

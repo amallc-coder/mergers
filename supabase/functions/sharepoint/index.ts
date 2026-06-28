@@ -33,6 +33,21 @@ const ROOT_FOLDER = Deno.env.get("SHAREPOINT_ROOT_FOLDER") ?? "";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
+// Lightweight access gate. Because the frontend is a public static site, the
+// Supabase anon key is visible in the JS bundle and would otherwise let anyone
+// invoke this function. Callers must include an `appKey` in the request body whose
+// SHA-256 matches this digest. The passcode itself is entered by the user in the app
+// (kept in localStorage, never compiled into the bundle) — only its hash lives here.
+// Override per-deploy with the APP_ACCESS_KEY_SHA256 secret if desired.
+const APP_KEY_SHA256 =
+  Deno.env.get("APP_ACCESS_KEY_SHA256") ??
+  "56b8ece9360067ca09c394436679972a0c52d69acd6252c1713391a8b79b2eaa";
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 // The 10 data-room category folders, matching the app's CATEGORY_META.
 const CATEGORY_FOLDERS = [
   "01. Logins Passwords",
@@ -270,6 +285,16 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
     const { action, ...args } = await req.json();
+
+    // Access gate — reject anyone without the shared passcode (see APP_KEY_SHA256).
+    const provided = typeof args.appKey === "string" ? args.appKey : "";
+    if (!provided || (await sha256Hex(provided)) !== APP_KEY_SHA256) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "unauthorized: missing or invalid access key" }),
+        { status: 401, headers: { ...cors, "Content-Type": "application/json" } },
+      );
+    }
+
     const token = await getToken();
 
     // whoami doesn't need a resolved drive (it reports drive resolution itself).
