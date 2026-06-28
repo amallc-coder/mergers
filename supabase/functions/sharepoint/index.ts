@@ -1041,6 +1041,11 @@ const READING_META: Record<string, { category: string; name: string; unit: strin
   ebitda_val:       { category: "finance_accounting",      name: "EBITDA",               unit: "USD" },
   adj_ebitda_val:   { category: "finance_accounting",      name: "Adjusted EBITDA",      unit: "USD" },
   net_income_val:   { category: "finance_accounting",      name: "Net income",           unit: "USD" },
+  operating_income_val: { category: "finance_accounting",  name: "Operating income (EBIT)", unit: "USD" },
+  depreciation_val: { category: "finance_accounting",      name: "Depreciation",         unit: "USD" },
+  amortization_val: { category: "finance_accounting",      name: "Amortization",         unit: "USD" },
+  interest_val:     { category: "finance_accounting",      name: "Interest expense",     unit: "USD" },
+  tax_val:          { category: "finance_accounting",      name: "Income tax expense",   unit: "USD" },
   payroll_val:      { category: "finance_accounting",      name: "Payroll expense",      unit: "USD" },
   rent_val:         { category: "finance_accounting",      name: "Rent expense",         unit: "USD" },
   opex_val:         { category: "finance_accounting",      name: "Operating expenses",   unit: "USD" },
@@ -1115,6 +1120,7 @@ function extractPrompt(name: string, practiceName: string, readable: boolean, ex
     "- Percentages as a number out of 100 (7.5 means 7.5%). Days and counts as plain numbers.",
     '- If the document shows several years/periods, emit ONE row PER period, with that period in "period" (e.g. "FY2024", "2025", "T12 2026-03", "YTD 2026").',
     '- "docPeriod" is the primary period the document covers.',
+    '- On an income statement / P&L, also capture (when shown as line items) operating income (operating_income_val), depreciation (depreciation_val), amortization (amortization_val), interest expense (interest_val), and income tax (tax_val). These let us compute EBITDA when it is not stated. Still never invent a line that is not there.',
     '- Only emit a row when you are reading a real figure — never guess or infer. "confidence" is 0..1.',
     "- If the file is not a financial / billing / payroll document (e.g. a license, a photo, a contract), set isFinancial=false and return an empty metrics array.",
     '- "summary" is one sentence describing what the document shows.',
@@ -1367,19 +1373,48 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
   if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
 
-  // EBITDA margin: EBITDA is usually stated in a summary/CIM while revenue lives in the
-  // P&L, so a same-document pair rarely exists. Compute against the revenue from the
-  // SAME PERIOD as the EBITDA figure when available (so a partial-year EBITDA is not put
-  // over full-year revenue — the period-consistency the user asked for), else the
-  // headline revenue. A margin outside ~-40%..60% means a wrong line (gross profit /
-  // COGS) was grabbed, so suppress both.
+  // EBITDA: prefer a stated figure; otherwise DERIVE it from ONE income statement's
+  // components (same doc → entity- and period-consistent):
+  //   EBITDA = Operating income + Depreciation + Amortization
+  //          = Net income + Interest + Taxes + Depreciation + Amortization
+  // Require depreciation or amortization to be present, else it would just be EBIT/NI.
+  const ebitdaFromDoc = (m: Map<string, RVal>): { value: number; anchor: RVal } | undefined => {
+    if (!m.has("depreciation_val") && !m.has("amortization_val")) return undefined;
+    const da = (m.get("depreciation_val")?.value ?? 0) + (m.get("amortization_val")?.value ?? 0);
+    const oi = m.get("operating_income_val");
+    if (oi) return { value: oi.value + da, anchor: oi };
+    const ni = m.get("net_income_val");
+    if (ni) return { value: ni.value + (m.get("interest_val")?.value ?? 0) + (m.get("tax_val")?.value ?? 0) + da, anchor: ni };
+    return undefined;
+  };
+  let ebitdaShown = ebitda; // stated EBITDA (ebitda_val / adj_ebitda_val)
+  let ebitdaIsDerived = false;
+  if (!ebitdaShown) {
+    let best: { value: number; anchor: RVal } | undefined;
+    let bestRank = -Infinity;
+    for (const m of byDoc.values()) {
+      const d = ebitdaFromDoc(m);
+      if (!d) continue;
+      const rank = periodRank(d.anchor.period);
+      if (rank > bestRank) { bestRank = rank; best = d; }
+    }
+    if (best) {
+      ebitdaShown = { value: best.value, period: best.anchor.period, conf: best.anchor.conf * 0.9, srcId: best.anchor.srcId };
+      ebitdaIsDerived = true;
+    }
+  }
+
+  // EBITDA margin against the revenue from the SAME PERIOD as the EBITDA figure when
+  // available (period-consistent), else the headline revenue. A margin outside
+  // ~-40%..60% means a wrong line (gross profit / COGS) was grabbed, so suppress both.
   const revRowsAll = [...(byKey.get("rev_net") ?? []), ...(byKey.get("rev_gross") ?? [])];
-  const ebRev = (ebitda ? revRowsAll.find((r) => r.period === ebitda.period) : undefined) ?? revForRatio;
-  const impliedMargin = ebitda && ebRev && ebRev.value > 0 ? (ebitda.value / ebRev.value) * 100 : undefined;
+  const ebRev = (ebitdaShown ? revRowsAll.find((r) => r.period === ebitdaShown!.period) : undefined) ?? revForRatio;
+  const impliedMargin = ebitdaShown && ebRev && ebRev.value > 0 ? (ebitdaShown.value / ebRev.value) * 100 : undefined;
   const ebitdaPlausible = impliedMargin === undefined || (impliedMargin <= 60 && impliedMargin >= -40);
-  if (ebitda && ebitdaPlausible) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
-  if (ebitda && ebitdaPlausible && impliedMargin !== undefined)
-    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, ebRev!.conf) * 0.95, true, -40, 60);
+  if (ebitdaShown && ebitdaPlausible)
+    add("ebitda", ebitdaIsDerived ? "EBITDA (derived)" : "EBITDA", "finance_accounting", "USD", ebitdaShown.value, ebitdaShown.period, ebitdaShown.srcId, ebitdaShown.conf, ebitdaIsDerived);
+  if (ebitdaShown && ebitdaPlausible && impliedMargin !== undefined)
+    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitdaShown.period, ebitdaShown.srcId, Math.min(ebitdaShown.conf, ebRev!.conf) * 0.95, true, -40, 60);
   if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
 
   // Payroll % of revenue from a SAME-DOC pair, so a partial-period or different-entity
@@ -1481,9 +1516,19 @@ async function extractMetrics(
     return { file: String(d.file_name), ...r };
   });
 
-  const readingRows = docResults.flatMap((r) =>
-    (r.rows ?? []).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() })),
-  );
+  // De-duplicate by the upsert key (metric_key + period). A single ON CONFLICT batch
+  // cannot contain two rows with the same conflict target (Postgres 21000) — otherwise
+  // the WHOLE slice fails and every reading in it is lost. When two docs report the same
+  // metric for the same period, keep the higher-confidence value.
+  const readingByKey = new Map<string, Record<string, unknown>>();
+  for (const r of docResults) {
+    for (const row of (r.rows ?? [])) {
+      const k = `${row.metric_key}|${row.period}`;
+      const ex = readingByKey.get(k);
+      if (!ex || Number(row.confidence_score ?? 0) > Number(ex.confidence_score ?? 0)) readingByKey.set(k, row);
+    }
+  }
+  const readingRows = [...readingByKey.values()].map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
   if (readingRows.length) await dbUpsert("ai_extracted_metrics", readingRows, "transaction_id,metric_key,period");
 
   // Re-consolidate from every reading row stored for this transaction (not just this slice).
