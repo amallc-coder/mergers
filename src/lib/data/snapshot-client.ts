@@ -51,4 +51,11 @@ export const dataApi = {
   patchRequestItem: (id: string, patch: Record<string, unknown>) =>
     call<unknown>("patchRequestItem", { id, ...patch }),
   upsertTask: (task: Record<string, unknown>) => call<unknown>("upsertTask", { task }),
+  setStage: (transactionId: string, stage: string, actorName?: string, note?: string) =>
+    call<{ id: string; stage: string; enteredAt: string }>("setStage", {
+      transactionId,
+      stage,
+      actorName,
+      note,
+    }),
 };

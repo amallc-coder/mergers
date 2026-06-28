@@ -21,6 +21,7 @@ import { seedSnapshot } from "./seed-snapshot";
 import { snapshotRepository } from "./snapshot";
 import { dataApi, isLiveBackend } from "./snapshot-client";
 import { hasAppKey } from "../sharepoint/client";
+import { DEFAULT_PIPELINE_STAGES, type PipelineStage } from "../domain/types";
 
 type Source = "seed" | "live";
 type Status = "idle" | "loading" | "ok" | "error";
@@ -30,13 +31,18 @@ interface DataContextValue {
   source: Source;
   status: Status;
   error: string | null;
+  /** The configurable pipeline stages (live config, or the seed default). */
+  pipelineStages: PipelineStage[];
   /** True when a live backend is configured for this build. */
   liveConfigured: boolean;
   /** Re-fetch the live snapshot (no-op when not live). */
   refresh: () => void;
+  /** Move a deal to a new stage (live only); refreshes the snapshot after. */
+  setStage: (transactionId: string, stage: string, actorName?: string) => Promise<void>;
 }
 
-const seedRepo = snapshotRepository(seedSnapshot());
+const seedSnap = seedSnapshot();
+const seedRepo = snapshotRepository(seedSnap);
 
 const DataContext = createContext<DataContextValue | null>(null);
 
@@ -46,6 +52,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [source, setSource] = useState<Source>("seed");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>(
+    seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES,
+  );
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
@@ -54,6 +63,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     if (!liveConfigured || !hasAppKey()) {
       setSource("seed");
       setRepo(seedRepo);
+      setPipelineStages(seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES);
       setStatus("idle");
       return;
     }
@@ -65,6 +75,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       .then((snap) => {
         if (cancelled) return;
         setRepo(snapshotRepository(snap));
+        setPipelineStages(
+          snap.pipelineStages?.length ? snap.pipelineStages : DEFAULT_PIPELINE_STAGES,
+        );
         setSource("live");
         setStatus("ok");
       })
@@ -81,9 +94,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     };
   }, [liveConfigured, tick]);
 
+  const setStage = useCallback(
+    async (transactionId: string, stage: string, actorName?: string) => {
+      // Writes only land on the live backend; in seed mode the pipeline is a demo.
+      if (source !== "live") throw new Error("Unlock the live backend to change stages.");
+      await dataApi.setStage(transactionId, stage, actorName);
+      refresh();
+    },
+    [source, refresh],
+  );
+
   const value = useMemo<DataContextValue>(
-    () => ({ repo, source, status, error, liveConfigured, refresh }),
-    [repo, source, status, error, liveConfigured, refresh],
+    () => ({ repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage }),
+    [repo, source, status, error, pipelineStages, liveConfigured, refresh, setStage],
   );
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;

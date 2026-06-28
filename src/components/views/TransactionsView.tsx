@@ -1,14 +1,17 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Plus } from "lucide-react";
+import { AlertTriangle, KanbanSquare, Plus, Table2 } from "lucide-react";
 import { Card, DealScoreBadge, PageHeader, ProgressBar, RiskBadge } from "@/components/ui";
 import { useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith } from "@/lib/selectors";
 import { formatDate } from "@/lib/format";
+import { PipelineBoard } from "./PipelineBoard";
 import { SourceBadge, txHref, ViewLoading } from "./shared";
 
 export function TransactionsView() {
+  const [view, setView] = useState<"table" | "pipeline">("table");
   const { data: summaries, loading, source } = useRepoData((repo) =>
     getTransactionSummariesWith(repo),
   );
@@ -25,11 +28,31 @@ export function TransactionsView() {
         }
       />
 
-      <div className="mb-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <SourceBadge source={source} />
+        <div className="inline-flex rounded-lg border border-ink-200 bg-panel p-0.5 text-xs">
+          <button
+            onClick={() => setView("table")}
+            className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium ${
+              view === "table" ? "bg-brand-50 text-brand-700" : "text-ink-500 hover:text-ink-800"
+            }`}
+          >
+            <Table2 size={14} /> Table
+          </button>
+          <button
+            onClick={() => setView("pipeline")}
+            className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium ${
+              view === "pipeline" ? "bg-brand-50 text-brand-700" : "text-ink-500 hover:text-ink-800"
+            }`}
+          >
+            <KanbanSquare size={14} /> Pipeline
+          </button>
+        </div>
       </div>
 
-      {!summaries || loading ? (
+      {view === "pipeline" ? (
+        <PipelineBoard />
+      ) : !summaries || loading ? (
         <ViewLoading label="Loading transactions…" />
       ) : (
         <Card>

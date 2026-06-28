@@ -16,6 +16,7 @@ import type {
   ExtractedMetric,
   Meeting,
   Organization,
+  PipelineStage,
   RiskFlag,
   SellerPortalUser,
   Task,
@@ -27,6 +28,7 @@ import type { DiligenceRepository, TransactionBundle } from "./repository";
 
 export interface Snapshot {
   org: Organization;
+  pipelineStages?: PipelineStage[];
   users: User[];
   transactions: Transaction[];
   contacts: TransactionContact[];
