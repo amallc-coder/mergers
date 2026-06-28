@@ -16,6 +16,30 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_BASE_PATH: basePath,
   },
+  webpack: (config, { webpack }) => {
+    // The report-export libraries (pptxgenjs/exceljs) reference Node core modules
+    // for their Node code paths, which we never hit in the browser. Strip the
+    // `node:` scheme and stub the Node built-ins so the static client build can
+    // bundle them (they're lazy-loaded only when a user clicks an export button).
+    config.plugins.push(
+      new webpack.NormalModuleReplacementPlugin(/^node:/, (resource) => {
+        resource.request = resource.request.replace(/^node:/, "");
+      }),
+    );
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      fs: false,
+      https: false,
+      http: false,
+      url: false,
+      zlib: false,
+      stream: false,
+      crypto: false,
+      path: false,
+      os: false,
+    };
+    return config;
+  },
 };
 
 export default nextConfig;
