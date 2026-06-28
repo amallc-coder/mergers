@@ -1289,6 +1289,37 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
     return arr.slice().sort((a, b) => periodRank(b.period) - periodRank(a.period) || b.conf - a.conf)[0];
   };
 
+  // Per-document index. Ratios (payroll %, EBITDA margin, collection rate) MUST be
+  // computed from figures in the SAME source statement — that guarantees the same
+  // legal entity AND the same period coverage, so a 3-month payroll is never divided
+  // by a 12-month revenue, and one entity's payroll never lands over another's revenue
+  // (e.g. a sleep-lab P&L's payroll over the main practice's revenue).
+  const byDoc = new Map<string, Map<string, RVal>>();
+  for (const r of rows) {
+    const srcId = String(r.source_document_id ?? "");
+    if (!srcId) continue;
+    const key = String(r.metric_key);
+    const value = Number(r.metric_value_numeric);
+    if (!isFinite(value)) continue;
+    if (!byDoc.has(srcId)) byDoc.set(srcId, new Map());
+    const m = byDoc.get(srcId)!;
+    const e: RVal = { value, period: String(r.period ?? ""), conf: Number(r.confidence_score ?? 0.5), srcId };
+    const ex = m.get(key);
+    if (!ex || periodRank(e.period) > periodRank(ex.period)) m.set(key, e); // latest per key within the doc
+  }
+  /** Best document (latest by `primaryKey`'s period) containing all of `keys`. */
+  const sameDocPair = (primaryKey: string, ...otherKeys: string[]): Map<string, RVal> | undefined => {
+    let best: Map<string, RVal> | undefined;
+    let bestRank = -Infinity;
+    for (const m of byDoc.values()) {
+      if (!m.has(primaryKey) || !otherKeys.every((k) => m.has(k))) continue;
+      const rank = periodRank(m.get(primaryKey)!.period);
+      if (rank > bestRank) { bestRank = rank; best = m; }
+    }
+    return best;
+  };
+  const revOf = (m: Map<string, RVal>) => m.get("rev_net") ?? m.get("rev_gross");
+
   const out: Record<string, unknown>[] = [];
   const add = (
     key: string, name: string, category: string, unit: string,
@@ -1336,19 +1367,33 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
   if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
 
-  // EBITDA sanity: an implied margin above ~60% (or below ~-40%) almost always means
-  // the model grabbed gross profit / a wrong line (e.g. a pharmacy's COGS), so suppress
-  // both EBITDA and the margin rather than show an impossible figure.
-  const impliedMargin = ebitda && revForRatio && revForRatio.value > 0 ? (ebitda.value / revForRatio.value) * 100 : undefined;
-  const ebitdaPlausible = impliedMargin === undefined || (impliedMargin <= 60 && impliedMargin >= -40);
-  if (ebitda && ebitdaPlausible) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
-  if (ebitda && ebitdaPlausible && impliedMargin !== undefined)
-    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, revForRatio!.conf) * 0.95, true, -40, 60);
-  const adjMargin = adj && revForRatio && revForRatio.value > 0 ? (adj.value / revForRatio.value) * 100 : undefined;
-  if (adj && (adjMargin === undefined || (adjMargin <= 70 && adjMargin >= -40)))
-    add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
-  if (payroll && revForRatio && revForRatio.value > 0)
-    add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (payroll.value / revForRatio.value) * 100, payroll.period, payroll.srcId, Math.min(payroll.conf, revForRatio.conf) * 0.95, true, 0, 200);
+  // EBITDA + margin from a SAME-DOC pair (entity- and period-consistent). A margin
+  // above ~60% / below ~-40% even within one statement means a wrong line (gross
+  // profit / COGS) was grabbed — suppress both. With no same-doc revenue we still show
+  // EBITDA on its own (a real figure) but no margin.
+  const eDoc = sameDocPair("ebitda_val", "rev_net") ?? sameDocPair("ebitda_val", "rev_gross");
+  if (eDoc) {
+    const e = eDoc.get("ebitda_val")!;
+    const rev = revOf(eDoc)!;
+    const margin = (e.value / rev.value) * 100;
+    const ok = margin <= 60 && margin >= -40;
+    if (ok) {
+      add("ebitda", "EBITDA", "finance_accounting", "USD", e.value, e.period, e.srcId, e.conf, false);
+      add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", margin, e.period, e.srcId, Math.min(e.conf, rev.conf) * 0.95, true, -40, 60);
+    }
+  } else if (ebitda) {
+    add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
+  }
+  if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
+
+  // Payroll % of revenue from a SAME-DOC pair, so a partial-period or different-entity
+  // payroll is never divided by the headline revenue.
+  const pDoc = sameDocPair("payroll_val", "rev_net") ?? sameDocPair("payroll_val", "rev_gross");
+  if (pDoc) {
+    const pay = pDoc.get("payroll_val")!;
+    const rev = revOf(pDoc)!;
+    add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (pay.value / rev.value) * 100, pay.period, pay.srcId, Math.min(pay.conf, rev.conf) * 0.95, true, 0, 200);
+  }
 
   // YoY revenue growth from two fiscal years of net revenue.
   const revRows = (byKey.get("rev_net") ?? []).filter((r) => parseYear(r.period) > 0);
@@ -1380,7 +1425,12 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   }
   if (denial) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", denial.value, denial.period, denial.srcId, denial.conf, false, 0, 100);
   else if (denied && totalClaims && totalClaims.value > 0) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", (denied.value / totalClaims.value) * 100, denied.period, denied.srcId, Math.min(denied.conf, totalClaims.conf) * 0.9, true, 0, 100);
-  if (charges && payments && charges.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (payments.value / charges.value) * 100, payments.period, payments.srcId, Math.min(charges.conf, payments.conf) * 0.95, true, 0, 200);
+  const cDoc = sameDocPair("payments_val", "charges_val");
+  if (cDoc) {
+    const pay = cDoc.get("payments_val")!;
+    const chg = cDoc.get("charges_val")!;
+    if (chg.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (pay.value / chg.value) * 100, pay.period, pay.srcId, Math.min(pay.conf, chg.conf) * 0.95, true, 0, 200);
+  }
   if (visits) add("annual_visit_volume", "Annual visit volume", "revenue_cycle_billing", "count", visits.value, visits.period, visits.srcId, visits.conf, false, 0);
   if (patients) add("total_patients_emr", "Total patients in EMR", "revenue_cycle_billing", "count", patients.value, patients.period, patients.srcId, patients.conf, false, 0);
   if (employees) add("total_employees", "Total employees", "hr_payroll", "count", employees.value, employees.period, employees.srcId, employees.conf, false, 0);
