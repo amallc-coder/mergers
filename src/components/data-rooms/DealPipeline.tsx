@@ -12,6 +12,7 @@ import { FolderTree, ExternalLink, Loader2, Database, Cloud } from "lucide-react
 import { Card, ProgressBar } from "@/components/ui";
 import { useData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith, type TransactionSummary } from "@/lib/selectors";
+import { txHref } from "@/components/views/shared";
 
 export function DealPipeline() {
   const { repo, source, status, error } = useData();
@@ -106,29 +107,24 @@ export function DealPipeline() {
               </div>
               <div className="mt-3 flex items-center justify-between border-t border-ink-100 pt-3 text-xs text-ink-500">
                 <span>{docCounts[s.transaction.id] ?? 0} document(s)</span>
-                {source === "live" ? (
-                  // The per-deal detail page isn't part of the live runtime path
-                  // yet; link straight to the real SharePoint data room instead.
-                  s.transaction.sharePointFolderUrl ? (
+                <div className="flex items-center gap-3">
+                  {s.transaction.sharePointFolderUrl ? (
                     <a
                       href={s.transaction.sharePointFolderUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="font-medium text-brand-600 hover:text-brand-700"
+                      className="text-ink-400 hover:text-brand-600"
                     >
-                      Open in SharePoint →
+                      SharePoint ↗
                     </a>
-                  ) : (
-                    <span className="text-ink-300">No data room link</span>
-                  )
-                ) : (
+                  ) : null}
                   <Link
-                    href={`/transactions/${s.transaction.id}`}
+                    href={txHref(s.transaction.id)}
                     className="font-medium text-brand-600 hover:text-brand-700"
                   >
                     Open data room →
                   </Link>
-                )}
+                </div>
               </div>
             </Card>
           ))}
