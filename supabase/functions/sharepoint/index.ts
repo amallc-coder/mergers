@@ -157,28 +157,35 @@ async function ensureChildFolder(token: string, driveId: string, parentId: strin
   });
 }
 
-/** The item under which data rooms are created: the library root, or ROOT_FOLDER if set. */
-async function ensureRootItem(token: string, driveId: string) {
-  if (!ROOT_FOLDER) return await graph(token, `/drives/${driveId}/root`);
-  const existing = await getByPath(token, driveId, ROOT_FOLDER);
+/** The item under which data rooms are created: the library root, or `folder` if set. */
+async function ensureRootItem(token: string, driveId: string, folder: string = ROOT_FOLDER) {
+  if (!folder) return await graph(token, `/drives/${driveId}/root`);
+  const existing = await getByPath(token, driveId, folder);
   if (existing) return existing;
   const root = await graph(token, `/drives/${driveId}/root`);
-  return await ensureChildFolder(token, driveId, root.id, ROOT_FOLDER, ROOT_FOLDER);
+  return await ensureChildFolder(token, driveId, root.id, folder, folder);
 }
 
-const dataRoomPath = (name: string) => (ROOT_FOLDER ? `${ROOT_FOLDER}/${name}` : name);
+const joinPath = (base: string, name: string) => (base ? `${base}/${name}` : name);
+const dataRoomPath = (name: string) => joinPath(ROOT_FOLDER, name);
 
 // ── Actions ─────────────────────────────────────────────────────
 
-/** Create (idempotently) the data-room folder + the 10 category subfolders. */
-async function ensureDataRoom(token: string, driveId: string, practiceName: string) {
-  const root = await ensureRootItem(token, driveId);
+/**
+ * Create (idempotently) the data-room folder + the 10 category subfolders.
+ * `baseFolder` is the parent under which the data room is created (defaults to the
+ * configured ROOT_FOLDER); pass it to file organized rooms into a specific home,
+ * e.g. the permanent "M&A Diligence" folder.
+ */
+async function ensureDataRoom(token: string, driveId: string, practiceName: string, baseFolder: string = ROOT_FOLDER) {
+  const root = await ensureRootItem(token, driveId, baseFolder);
   const dataRoomName = `Data Room - ${practiceName}`;
-  const dataRoom = await ensureChildFolder(token, driveId, root.id, dataRoomName, dataRoomPath(dataRoomName));
+  const drPath = joinPath(baseFolder, dataRoomName);
+  const dataRoom = await ensureChildFolder(token, driveId, root.id, dataRoomName, drPath);
 
   const folders: Record<string, { id: string; webUrl: string }> = {};
   for (const cat of CATEGORY_FOLDERS) {
-    const f = await ensureChildFolder(token, driveId, dataRoom.id, cat, `${dataRoomPath(dataRoomName)}/${cat}`);
+    const f = await ensureChildFolder(token, driveId, dataRoom.id, cat, `${drPath}/${cat}`);
     folders[cat] = { id: f.id, webUrl: f.webUrl };
   }
   return { dataRoom: { id: dataRoom.id, name: dataRoomName, webUrl: dataRoom.webUrl }, folders };
@@ -564,18 +571,31 @@ async function classifyOne(token: string, driveId: string, item: { id: string; n
   }
 
   try {
-    let resp = await run(true);
-    // If the attachment itself was rejected (PDF too large / too many pages → 400/413),
-    // fall back to a name-based pass so a clearly-named file isn't dumped into review.
-    if (!resp.ok && attachment && (resp.status === 400 || resp.status === 413)) {
-      oversized = true;
-      readable = false;
-      resp = await run(false);
+    let useAttachment = true;
+    let parsed: { category: string; confidence: number; documentType: string; reasoning: string; error: string | undefined } = {
+      category: REVIEW_FOLDER, confidence: 0, documentType: "", reasoning: "", error: undefined,
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let resp = await run(useAttachment);
+      // If the attachment itself was rejected (PDF too large / too many pages → 400/413),
+      // drop it and retry name-only so a clearly-named file isn't dumped into review.
+      if (!resp.ok && useAttachment && attachment && (resp.status === 400 || resp.status === 413)) {
+        oversized = true;
+        readable = false;
+        useAttachment = false;
+        resp = await run(false);
+      }
+      if (!resp.ok) {
+        return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${resp.status}: ${String(resp.text).slice(0, 300)}`, readable, downloadFailed, oversized, error: `claude_${resp.status}` };
+      }
+      parsed = parseClaude(resp.json!);
+      // The structured-output call occasionally returns a degenerate stub (confidence 0
+      // with an empty/"placeholder" documentType) instead of engaging. Retry those.
+      const degenerate = !parsed.error && (parsed.confidence ?? 0) === 0 &&
+        (!parsed.documentType || parsed.documentType === "placeholder");
+      if (degenerate && attempt < 2) continue;
+      break;
     }
-    if (!resp.ok) {
-      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${resp.status}: ${String(resp.text).slice(0, 300)}`, readable, downloadFailed, oversized, error: `claude_${resp.status}` };
-    }
-    const parsed = parseClaude(resp.json!);
     return { ...parsed, readable, downloadFailed, oversized };
   } catch (e) {
     return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, downloadFailed, oversized, error: "exception" };
@@ -591,7 +611,7 @@ async function classifyDataRoom(
   token: string,
   driveId: string,
   practiceName: string,
-  opts: { dryRun?: boolean; offset?: number; limit?: number; sourcePath?: string },
+  opts: { dryRun?: boolean; offset?: number; limit?: number; sourcePath?: string; destRoot?: string },
 ) {
   if (!ANTHROPIC_API_KEY) return { error: "ANTHROPIC_API_KEY is not set" };
   const dryRun = opts.dryRun ?? false;
@@ -599,9 +619,11 @@ async function classifyDataRoom(
   const limit = opts.limit ?? 8;
 
   // Read loose files from `sourcePath` (e.g. a staging dump) but file them into the
-  // real destination data room under ROOT_FOLDER. Defaults to in-place if no source.
+  // destination data room under `destRoot` (the permanent home, e.g. "M&A Diligence").
+  // destRoot defaults to ROOT_FOLDER; sourcePath defaults to the destination (in-place).
+  const destBase = opts.destRoot ?? ROOT_FOLDER;
   const dataRoomName = `Data Room - ${practiceName}`;
-  const destPath = dataRoomPath(dataRoomName);
+  const destPath = joinPath(destBase, dataRoomName);
   const srcPath = opts.sourcePath ?? destPath;
   const root = await getByPath(token, driveId, srcPath);
   if (!root) return { found: false, practiceName, sourcePath: srcPath };
@@ -635,7 +657,7 @@ async function classifyDataRoom(
   // category folders exist, then move classified files into them.
   const catId: Record<string, string> = {};
   if (!dryRun && slice.length > 0) {
-    const dr = await ensureDataRoom(token, driveId, practiceName);
+    const dr = await ensureDataRoom(token, driveId, practiceName, destBase);
     for (const cat of CATEGORY_FOLDERS) catId[cat] = dr.folders[cat].id;
   }
 
@@ -800,7 +822,7 @@ Deno.serve(async (req) => {
         result = await status(token, driveId);
         break;
       case "ensureDataRoom":
-        result = await ensureDataRoom(token, driveId, args.practiceName);
+        result = await ensureDataRoom(token, driveId, args.practiceName, args.destRoot);
         break;
       case "listDocuments":
         result = await listDocuments(token, driveId, args.practiceName);
@@ -817,6 +839,7 @@ Deno.serve(async (req) => {
           offset: args.offset ?? 0,
           limit: args.limit ?? 8,
           sourcePath: args.sourcePath,
+          destRoot: args.destRoot,
         });
         break;
       case "moveDocument":
