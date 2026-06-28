@@ -68,6 +68,31 @@ export interface DeltaChange {
   parentPath?: string;
 }
 
+export interface TreeEntry {
+  type: "folder" | "file";
+  id: string;
+  name: string;
+  relPath: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  webUrl?: string;
+  childCount?: number;
+  lastModified?: string;
+}
+
+export interface TreeResult {
+  found: boolean;
+  root?: { id: string; name: string; webUrl: string };
+  count?: number;
+  entries?: TreeEntry[];
+}
+
+export interface IntakeResult {
+  home: string;
+  processedRooms: number;
+  rooms: { practiceName: string; total?: number; results?: unknown[] }[];
+}
+
 /** True when the Supabase env is present (the build was given the URL + anon key). */
 export function isSharePointConfigured(): boolean {
   return !!SUPABASE_URL && !!ANON_KEY;
@@ -150,4 +175,11 @@ export const sharePoint = {
     }),
   deltaSync: (deltaLink?: string) =>
     call<{ changes: DeltaChange[]; deltaLink: string | null }>("deltaSync", { deltaLink }),
+  /** Walk a folder path in the library (e.g. "M&A Diligence") and return every folder + file. */
+  listTree: (path: string) => call<TreeResult>("listTree", { path }),
+  /** Manually organize anything sitting in every data room's Intake folder. */
+  organizeIntakes: () => call<IntakeResult>("organizeIntakes", {}),
 };
+
+/** Where the organized data rooms live in the library (matches the backend default). */
+export const INTAKE_HOME = "M&A Diligence";
