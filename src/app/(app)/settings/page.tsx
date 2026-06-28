@@ -9,6 +9,7 @@ import {
   Users,
 } from "lucide-react";
 import { Avatar, Badge, Card, CardHeader, PageHeader } from "@/components/ui";
+import { SharePointPanel } from "@/components/sharepoint/SharePointPanel";
 import { getRepository } from "@/lib/data/repository";
 import { ROLE_LABELS } from "@/lib/domain/rbac";
 import { AMA_DILIGENCE_TEMPLATE } from "@/lib/domain/diligence-template";
@@ -20,7 +21,7 @@ export default async function SettingsPage() {
 
   const integrations = [
     { name: "Microsoft Entra ID (SSO + MFA)", icon: Cloud, status: "Configurable", detail: "AZURE_TENANT_ID / AZURE_CLIENT_ID" },
-    { name: "SharePoint (Microsoft Graph)", icon: Cloud, status: "Configurable", detail: "Data-room sync · Phase 2" },
+    { name: "SharePoint (Microsoft Graph)", icon: Cloud, status: "Live", detail: "Merger & Acquisition site · data-room sync" },
     { name: "Outlook / Microsoft 365", icon: Mail, status: "Configurable", detail: "Calendar + email · Phase 2" },
     { name: "Azure OpenAI + Document Intelligence", icon: Sparkles, status: "Configurable", detail: "Classification + extraction · Phase 3" },
     { name: "Supabase Postgres", icon: FileStack, status: "Schema ready", detail: "DATA_BACKEND=supabase" },
@@ -29,6 +30,11 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" subtitle="Users, templates, integrations, and automation" />
+
+      {/* Live SharePoint connection */}
+      <div className="mb-6">
+        <SharePointPanel variant="status" />
+      </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Users */}
