@@ -69,6 +69,10 @@ const CATEGORY_FOLDERS = [
 
 const REVIEW_FOLDER = "10. Unclassified Review Queue";
 
+// Files about AMA (the acquirer / parent company) rather than the practice go here,
+// a subfolder created alongside the 10 diligence categories inside each data room.
+const AMA_FOLDER = "AMA Data Room";
+
 // Guidance the classifier sees for each diligence category.
 const CATEGORY_GUIDE = [
   "01. Logins Passwords — login credentials, portal access, usernames/passwords, account/login screenshots",
@@ -86,13 +90,28 @@ const CATEGORY_GUIDE = [
 const CLASSIFY_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["category", "confidence", "documentType", "reasoning"],
+  required: ["category", "confidence", "documentType", "reasoning", "amaRelated"],
   properties: {
     category: { type: "string", enum: CATEGORY_FOLDERS },
     confidence: { type: "number" },
     documentType: { type: "string" },
     reasoning: { type: "string" },
+    // True when the file concerns AMA (American Medical Administrators / the acquiring
+    // or parent company) rather than the practice being acquired. Such files are filed
+    // into the "AMA Data Room" subfolder instead of a diligence category.
+    amaRelated: { type: "boolean" },
   },
+};
+
+// Forced tool use is the most reliable way to get structured output from Claude:
+// tool_choice pins this tool and strict:true guarantees the input validates against
+// the schema, which avoids the degenerate "placeholder" stubs that output_config can
+// occasionally emit.
+const CLASSIFY_TOOL = {
+  name: "classify_document",
+  description: "Record the diligence category and metadata for the data-room file, grounded in its actual content.",
+  strict: true,
+  input_schema: CLASSIFY_SCHEMA,
 };
 
 const cors = {
@@ -188,6 +207,9 @@ async function ensureDataRoom(token: string, driveId: string, practiceName: stri
     const f = await ensureChildFolder(token, driveId, dataRoom.id, cat, `${drPath}/${cat}`);
     folders[cat] = { id: f.id, webUrl: f.webUrl };
   }
+  // The AMA (acquirer) subfolder for files that belong to the parent company.
+  const ama = await ensureChildFolder(token, driveId, dataRoom.id, AMA_FOLDER, `${drPath}/${AMA_FOLDER}`);
+  folders[AMA_FOLDER] = { id: ama.id, webUrl: ama.webUrl };
   return { dataRoom: { id: dataRoom.id, name: dataRoomName, webUrl: dataRoom.webUrl }, folders };
 }
 
@@ -460,7 +482,12 @@ function classifyPrompt(name: string, parentName: string, readable: boolean, ext
     "Categories:",
     CATEGORY_GUIDE,
     "",
-    'Rules: decide from content first. "confidence" is 0 to 1. If the file is genuinely ambiguous, unreadable, or could fit multiple categories, choose "10. Unclassified Review Queue" and explain why. "documentType" is a short label of what the file actually is (e.g. "Bank statement", "Payroll register", "Driver\'s license").',
+    `This data room belongs to the practice: ${JSON.stringify(parentName)} — but files are routed by the practice being organized, so treat the practice as the acquisition target.`,
+    'Rules:',
+    '- Decide from content first. "confidence" is 0 to 1. "documentType" is a short label of what the file actually is (e.g. "Bank statement", "Payroll register", "Driver\'s license").',
+    '- Anything about charges, payments & adjustments, CPT procedure codes, or ICD diagnosis codes belongs in "03. Revenue Cycle Billing".',
+    '- Set "amaRelated" to true ONLY when the file primarily concerns AMA (American Medical Administrators) or the acquiring/parent company itself — e.g. an AMA capitalization table, AMA formation/corporate documents, or AMA-level financials — rather than the practice being acquired. Otherwise set it false. (Still fill in the best "category" either way.)',
+    '- If the file is genuinely ambiguous, unreadable, or could fit multiple categories, choose "10. Unclassified Review Queue" and explain why.',
   );
   return lines.join("\n");
 }
@@ -486,8 +513,9 @@ async function callClaude(
       headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 800,
-        output_config: { format: { type: "json_schema", schema: CLASSIFY_SCHEMA } },
+        max_tokens: 1024,
+        tools: [CLASSIFY_TOOL],
+        tool_choice: { type: "tool", name: "classify_document" },
         messages: [{ role: "user", content: blocks }],
       }),
     });
@@ -500,20 +528,22 @@ async function callClaude(
   return { ok: false, status, text };
 }
 
-/** Parse a successful Claude response into the classification fields. */
+/** Parse a successful Claude response (forced tool_use) into the classification fields. */
 function parseClaude(json: Record<string, unknown>) {
   if (json.stop_reason === "refusal") {
-    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(refusal)", reasoning: "model declined to classify", error: "refusal" as string | undefined };
+    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(refusal)", reasoning: "model declined to classify", amaRelated: false, error: "refusal" as string | undefined };
   }
-  const textBlock = ((json.content as Record<string, unknown>[]) ?? []).find((b) => b.type === "text");
-  const raw = String((textBlock as Record<string, unknown>)?.text ?? "");
-  const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  const toolUse = ((json.content as Record<string, unknown>[]) ?? []).find(
+    (b) => b.type === "tool_use" && b.name === "classify_document",
+  );
+  const parsed = ((toolUse?.input as Record<string, unknown>) ?? {}) as Record<string, unknown>;
   return {
-    category: CATEGORY_FOLDERS.includes(parsed.category) ? parsed.category : REVIEW_FOLDER,
+    category: CATEGORY_FOLDERS.includes(parsed.category as string) ? (parsed.category as string) : REVIEW_FOLDER,
     confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
     documentType: String(parsed.documentType ?? ""),
     reasoning: String(parsed.reasoning ?? ""),
-    error: undefined as string | undefined,
+    amaRelated: parsed.amaRelated === true,
+    error: toolUse ? undefined : ("no_tool_use" as string | undefined),
   };
 }
 
@@ -572,8 +602,8 @@ async function classifyOne(token: string, driveId: string, item: { id: string; n
 
   try {
     let useAttachment = true;
-    let parsed: { category: string; confidence: number; documentType: string; reasoning: string; error: string | undefined } = {
-      category: REVIEW_FOLDER, confidence: 0, documentType: "", reasoning: "", error: undefined,
+    let parsed: { category: string; confidence: number; documentType: string; reasoning: string; amaRelated: boolean; error: string | undefined } = {
+      category: REVIEW_FOLDER, confidence: 0, documentType: "", reasoning: "", amaRelated: false, error: undefined,
     };
     for (let attempt = 0; attempt < 3; attempt++) {
       let resp = await run(useAttachment);
@@ -586,11 +616,11 @@ async function classifyOne(token: string, driveId: string, item: { id: string; n
         resp = await run(false);
       }
       if (!resp.ok) {
-        return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${resp.status}: ${String(resp.text).slice(0, 300)}`, readable, downloadFailed, oversized, error: `claude_${resp.status}` };
+        return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${resp.status}: ${String(resp.text).slice(0, 300)}`, readable, downloadFailed, oversized, amaRelated: false, error: `claude_${resp.status}` };
       }
       parsed = parseClaude(resp.json!);
-      // The structured-output call occasionally returns a degenerate stub (confidence 0
-      // with an empty/"placeholder" documentType) instead of engaging. Retry those.
+      // Belt-and-suspenders: retry if the model still returns a degenerate stub
+      // (confidence 0 with an empty/"placeholder" documentType) instead of engaging.
       const degenerate = !parsed.error && (parsed.confidence ?? 0) === 0 &&
         (!parsed.documentType || parsed.documentType === "placeholder");
       if (degenerate && attempt < 2) continue;
@@ -598,7 +628,7 @@ async function classifyOne(token: string, driveId: string, item: { id: string; n
     }
     return { ...parsed, readable, downloadFailed, oversized };
   } catch (e) {
-    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, downloadFailed, oversized, error: "exception" };
+    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, downloadFailed, oversized, amaRelated: false, error: "exception" };
   }
 }
 
@@ -628,7 +658,7 @@ async function classifyDataRoom(
   const root = await getByPath(token, driveId, srcPath);
   if (!root) return { found: false, practiceName, sourcePath: srcPath };
 
-  const catSet = new Set(CATEGORY_FOLDERS.map((c) => c.toLowerCase()));
+  const catSet = new Set([...CATEGORY_FOLDERS, AMA_FOLDER].map((c) => c.toLowerCase()));
 
   // Collect loose files (anything not already inside a category folder).
   const loose: { id: string; name: string; size: number; parentName: string }[] = [];
@@ -659,13 +689,30 @@ async function classifyDataRoom(
   if (!dryRun && slice.length > 0) {
     const dr = await ensureDataRoom(token, driveId, practiceName, destBase);
     for (const cat of CATEGORY_FOLDERS) catId[cat] = dr.folders[cat].id;
+    catId[AMA_FOLDER] = dr.folders[AMA_FOLDER].id;
   }
+
+  // A file is forced into Revenue Cycle Billing if its name or detected type is about
+  // CPT / ICD / charges (underscore counts as a word boundary; avoids matching "discharge").
+  const BILLING = "03. Revenue Cycle Billing";
+  const billingRe = /(^|[^a-z0-9])(cpt|icd|charges?)([^a-z0-9]|$)/i;
 
   // Concurrency 2 keeps peak memory low (each in-flight file holds its bytes + base64).
   const results = await mapLimit(slice, 2, async (f) => {
     const c = await classifyOne(token, driveId, f);
-    const needsReview = c.category === REVIEW_FOLDER || (c.confidence ?? 0) < 0.6 || !!(c as Record<string, unknown>).error;
-    const target = needsReview ? REVIEW_FOLDER : c.category;
+    const ama = (c as Record<string, unknown>).amaRelated === true;
+    const billingHint = billingRe.test(f.name) || billingRe.test(c.documentType ?? "");
+    const lowConfOrError = c.category === REVIEW_FOLDER || (c.confidence ?? 0) < 0.6 || !!(c as Record<string, unknown>).error;
+
+    // Routing: AMA files → AMA Data Room; a CPT/ICD/charges file that would otherwise be
+    // unsure → Revenue Cycle Billing (the rule); else the model category, or review.
+    let target: string;
+    if (ama) target = AMA_FOLDER;
+    else if (lowConfOrError && billingHint) target = BILLING;
+    else if (lowConfOrError) target = REVIEW_FOLDER;
+    else target = c.category;
+    const needsReview = target === REVIEW_FOLDER;
+
     let moved = false;
     if (!dryRun && catId[target]) {
       try {
@@ -684,6 +731,7 @@ async function classifyDataRoom(
       oversized: (c as Record<string, unknown>).oversized,
       documentType: c.documentType,
       category: c.category,
+      amaRelated: ama,
       confidence: c.confidence,
       needsReview,
       target,
