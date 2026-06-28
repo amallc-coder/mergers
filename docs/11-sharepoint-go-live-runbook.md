@@ -32,7 +32,7 @@ documents, auto-creating the category folders per deal, and moving/organizing fi
 | Entra app registered + client secret created | IT admin | ✅ done |
 | Graph permission `Sites.Selected` (Application) **admin-consented** | IT admin | ✅ done — the app token carries `roles: ["Sites.Selected"]` |
 | Azure secrets set in Supabase (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`) | Nish | ✅ done |
-| Edge Function `sharepoint` deployed | Nish | ✅ **v9 live** — runtime drive resolution + team access-passcode gate |
+| Edge Function `sharepoint` deployed | Nish | ✅ **v10 live** — runtime drive resolution, access-passcode gate, plus `resolveShare`/`listTree`/`deleteItem` for reading source folders and cleanup |
 | **Per-site `write` grant for the app on the M&A site** | IT admin | ✅ **done** — the app reads and writes the M&A library |
 | End-to-end verified (`whoami` → `status` → `ensureDataRoom` → `listDocuments`) | — | ✅ **done 2026-06-27** |
 | Frontend wired (live console on Data Rooms + status on Settings) | — | ✅ **done** — anon-key auth + passcode in request body |

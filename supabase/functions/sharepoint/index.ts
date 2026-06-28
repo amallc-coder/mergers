@@ -196,6 +196,82 @@ async function moveDocument(token: string, driveId: string, itemId: string, targ
   return { id: updated.id, name: updated.name, webUrl: updated.webUrl, parentId: targetFolderId };
 }
 
+/** Delete a drive item (used to clean up scratch folders). */
+async function deleteItem(token: string, driveId: string, itemId: string) {
+  await graph(token, `/drives/${driveId}/items/${itemId}`, { method: "DELETE" });
+  return { deleted: true, id: itemId };
+}
+
+// ── Generic tree reading (source compilations, arbitrary folders) ──────────────
+
+/** Encode a SharePoint/OneDrive sharing URL into a Graph share id. */
+function shareIdFromUrl(url: string): string {
+  const b64 = btoa(url).replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+  return "u!" + b64;
+}
+
+/** Recursively list every folder + file under an item, with relative paths. */
+async function walkTree(
+  token: string,
+  driveId: string,
+  itemId: string,
+  relPath: string,
+  entries: Record<string, unknown>[],
+) {
+  let next: string | null =
+    `/drives/${driveId}/items/${itemId}/children?$top=200&$select=id,name,size,file,folder,webUrl,lastModifiedDateTime`;
+  while (next) {
+    const page = await graph(token, next);
+    for (const c of page.value ?? []) {
+      const rel = relPath ? `${relPath}/${c.name}` : c.name;
+      if (c.folder) {
+        entries.push({ type: "folder", id: c.id, name: c.name, relPath: rel, childCount: c.folder.childCount ?? 0 });
+        await walkTree(token, driveId, c.id, rel, entries);
+      } else if (c.file) {
+        entries.push({
+          type: "file",
+          id: c.id,
+          name: c.name,
+          relPath: rel,
+          sizeBytes: c.size ?? 0,
+          mimeType: c.file.mimeType,
+          webUrl: c.webUrl,
+          lastModified: c.lastModifiedDateTime,
+        });
+      }
+    }
+    next = page["@odata.nextLink"] ?? null;
+  }
+}
+
+/** Resolve a sharing link to its driveItem and list everything beneath it. */
+async function resolveShare(token: string, shareUrl: string) {
+  const shareId = shareIdFromUrl(shareUrl);
+  const item = await graph(
+    token,
+    `/shares/${shareId}/driveItem?$select=id,name,webUrl,parentReference,folder,file`,
+  );
+  if (!item) return { found: false };
+  const driveId = item.parentReference?.driveId as string | undefined;
+  const entries: Record<string, unknown>[] = [];
+  if (item.folder && driveId) await walkTree(token, driveId, item.id, "", entries);
+  return {
+    found: true,
+    root: { id: item.id, name: item.name, driveId, webUrl: item.webUrl, isFolder: !!item.folder },
+    count: entries.length,
+    entries,
+  };
+}
+
+/** List everything beneath a path in the configured library (path "" = root). */
+async function listTree(token: string, driveId: string, path: string) {
+  const root = await getByPath(token, driveId, path || "");
+  if (!root) return { found: false, path };
+  const entries: Record<string, unknown>[] = [];
+  await walkTree(token, driveId, root.id, "", entries);
+  return { found: true, root: { id: root.id, name: root.name, webUrl: root.webUrl }, count: entries.length, entries };
+}
+
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
 async function deltaSync(token: string, driveId: string, deltaLink?: string) {
   const start = deltaLink ?? `/drives/${driveId}/root/delta`;
@@ -305,6 +381,15 @@ Deno.serve(async (req) => {
       });
     }
 
+    // resolveShare carries its own driveId (from the share), so it runs before
+    // the configured-library drive is resolved.
+    if (action === "resolveShare") {
+      const result = await resolveShare(token, args.shareUrl);
+      return new Response(JSON.stringify({ ok: true, result }), {
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
     const driveId = await resolveDriveId(token);
 
     let result: unknown;
@@ -318,8 +403,14 @@ Deno.serve(async (req) => {
       case "listDocuments":
         result = await listDocuments(token, driveId, args.practiceName);
         break;
+      case "listTree":
+        result = await listTree(token, driveId, args.path ?? "");
+        break;
       case "moveDocument":
         result = await moveDocument(token, driveId, args.itemId, args.targetFolderId, args.newName);
+        break;
+      case "deleteItem":
+        result = await deleteItem(token, driveId, args.itemId);
         break;
       case "deltaSync":
         result = await deltaSync(token, driveId, args.deltaLink);
