@@ -1367,23 +1367,19 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
   if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
 
-  // EBITDA + margin from a SAME-DOC pair (entity- and period-consistent). A margin
-  // above ~60% / below ~-40% even within one statement means a wrong line (gross
-  // profit / COGS) was grabbed — suppress both. With no same-doc revenue we still show
-  // EBITDA on its own (a real figure) but no margin.
-  const eDoc = sameDocPair("ebitda_val", "rev_net") ?? sameDocPair("ebitda_val", "rev_gross");
-  if (eDoc) {
-    const e = eDoc.get("ebitda_val")!;
-    const rev = revOf(eDoc)!;
-    const margin = (e.value / rev.value) * 100;
-    const ok = margin <= 60 && margin >= -40;
-    if (ok) {
-      add("ebitda", "EBITDA", "finance_accounting", "USD", e.value, e.period, e.srcId, e.conf, false);
-      add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", margin, e.period, e.srcId, Math.min(e.conf, rev.conf) * 0.95, true, -40, 60);
-    }
-  } else if (ebitda) {
-    add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
-  }
+  // EBITDA margin: EBITDA is usually stated in a summary/CIM while revenue lives in the
+  // P&L, so a same-document pair rarely exists. Compute against the revenue from the
+  // SAME PERIOD as the EBITDA figure when available (so a partial-year EBITDA is not put
+  // over full-year revenue — the period-consistency the user asked for), else the
+  // headline revenue. A margin outside ~-40%..60% means a wrong line (gross profit /
+  // COGS) was grabbed, so suppress both.
+  const revRowsAll = [...(byKey.get("rev_net") ?? []), ...(byKey.get("rev_gross") ?? [])];
+  const ebRev = (ebitda ? revRowsAll.find((r) => r.period === ebitda.period) : undefined) ?? revForRatio;
+  const impliedMargin = ebitda && ebRev && ebRev.value > 0 ? (ebitda.value / ebRev.value) * 100 : undefined;
+  const ebitdaPlausible = impliedMargin === undefined || (impliedMargin <= 60 && impliedMargin >= -40);
+  if (ebitda && ebitdaPlausible) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
+  if (ebitda && ebitdaPlausible && impliedMargin !== undefined)
+    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, ebRev!.conf) * 0.95, true, -40, 60);
   if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
 
   // Payroll % of revenue from a SAME-DOC pair, so a partial-period or different-entity
@@ -1516,8 +1512,31 @@ async function extractMetrics(
   };
 }
 
-// ── HTTP entry ──────────────────────────────────────────────────
+/**
+ * Re-run consolidation from the reading rows already stored — no document reads.
+ * Used after a consolidation-logic change so the live headline figures refresh
+ * without re-extracting (which would re-read every file).
+ */
+async function reconsolidateAll(): Promise<unknown> {
+  const txRows = await dbGet(`ai_extracted_metrics?source=eq.ai&period=neq.Consolidated&select=transaction_id`);
+  const txIds = [...new Set(txRows.map((r) => String(r.transaction_id)).filter(Boolean))];
+  let written = 0;
+  for (const txId of txIds) {
+    const allReading = await dbGet(
+      `ai_extracted_metrics?transaction_id=eq.${txId}&source=eq.ai&metric_key=in.(${READING_KEYS.join(",")})` +
+        `&select=metric_key,metric_value_numeric,period,confidence_score,source_document_id`,
+    );
+    await dbDelete(`ai_extracted_metrics?transaction_id=eq.${txId}&period=eq.Consolidated&source=eq.ai`);
+    const displayRows = consolidate(allReading).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
+    if (displayRows.length) {
+      await dbUpsert("ai_extracted_metrics", displayRows, "transaction_id,metric_key,period");
+      written += displayRows.length;
+    }
+  }
+  return { transactions: txIds.length, consolidatedRowsWritten: written };
+}
 
+// ── HTTP entry ──────────────────────────────────────────────────
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
@@ -1645,6 +1664,9 @@ Deno.serve(async (req) => {
         break;
       case "deltaSync":
         result = await deltaSync(token, driveId, args.deltaLink);
+        break;
+      case "reconsolidate":
+        result = await reconsolidateAll();
         break;
       default:
         return new Response(JSON.stringify({ error: `unknown action: ${action}` }), {
