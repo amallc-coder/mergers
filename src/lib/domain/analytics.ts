@@ -21,6 +21,7 @@ import type {
   FolderMeta,
   MissingItemReport,
   RiskLevel,
+  SellerPortalUser,
   Transaction,
 } from "./types";
 
@@ -264,6 +265,20 @@ export function detectKpiAnomalies(metrics: ExtractedMetric[]): KpiAnomaly[] {
   }
 
   return out;
+}
+
+/**
+ * Whether a seller portal token currently grants access. A link is valid only
+ * while it is active AND not past its `expiresAt`. Fails CLOSED: an unparseable
+ * expiry is treated as expired so a malformed timestamp never grants access.
+ */
+export function sellerTokenValid(u: SellerPortalUser, now: number = Date.now()): boolean {
+  if (!u.active) return false;
+  if (u.expiresAt) {
+    const exp = Date.parse(u.expiresAt);
+    if (Number.isNaN(exp) || exp <= now) return false;
+  }
+  return true;
 }
 
 export function metricLookup(metrics: ExtractedMetric[]): MetricLookup {

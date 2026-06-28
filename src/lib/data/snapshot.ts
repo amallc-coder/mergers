@@ -29,6 +29,7 @@ import type {
   TransactionContact,
   User,
 } from "../domain/types";
+import { sellerTokenValid } from "../domain/analytics";
 import type { DiligenceRepository, TransactionBundle } from "./repository";
 
 export interface Snapshot {
@@ -114,7 +115,7 @@ export function snapshotRepository(s: Snapshot): DiligenceRepository {
       );
     },
     async sellerByToken(token: string) {
-      return s.sellerPortalUsers.find((u) => u.accessToken === token && u.active);
+      return s.sellerPortalUsers.find((u) => u.accessToken === token && sellerTokenValid(u));
     },
     async sellerPortalUsers() {
       return s.sellerPortalUsers;

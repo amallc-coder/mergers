@@ -23,6 +23,7 @@ import type {
   TransactionContact,
   User,
 } from "../domain/types";
+import { sellerTokenValid } from "../domain/analytics";
 import * as seed from "./seed";
 
 export interface TransactionBundle {
@@ -116,7 +117,7 @@ class SeedRepository implements DiligenceRepository {
     return [...rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
   async sellerByToken(token: string) {
-    return seed.SELLER_PORTAL_USERS.find((s) => s.accessToken === token && s.active);
+    return seed.SELLER_PORTAL_USERS.find((s) => s.accessToken === token && sellerTokenValid(s));
   }
   async sellerPortalUsers() {
     return seed.SELLER_PORTAL_USERS;
