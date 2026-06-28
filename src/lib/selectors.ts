@@ -12,7 +12,7 @@ import {
   isOverdue,
 } from "./domain/analytics";
 import { generateExecutiveSummary } from "./domain/summary";
-import { getRepository, type TransactionBundle } from "./data/repository";
+import { getRepository, type DiligenceRepository, type TransactionBundle } from "./data/repository";
 import { NOW } from "./data/seed";
 import type {
   CompletionStats,
@@ -33,11 +33,17 @@ export interface TransactionView extends TransactionBundle {
   execSummary: ExecutiveSummary;
 }
 
-export async function getTransactionView(id: string): Promise<TransactionView | undefined> {
-  const repo = getRepository();
+export async function getTransactionViewWith(
+  repo: DiligenceRepository,
+  id: string,
+): Promise<TransactionView | undefined> {
   const bundle = await repo.bundle(id);
   if (!bundle) return undefined;
   return decorate(bundle);
+}
+
+export async function getTransactionView(id: string): Promise<TransactionView | undefined> {
+  return getTransactionViewWith(getRepository(), id);
 }
 
 function decorate(bundle: TransactionBundle): TransactionView {
@@ -65,8 +71,9 @@ export interface TransactionSummary {
   recentUploads: number;
 }
 
-export async function getTransactionSummaries(): Promise<TransactionSummary[]> {
-  const repo = getRepository();
+export async function getTransactionSummariesWith(
+  repo: DiligenceRepository,
+): Promise<TransactionSummary[]> {
   const transactions = await repo.transactions();
   return Promise.all(
     transactions.map(async (transaction) => {
@@ -91,6 +98,10 @@ export async function getTransactionSummaries(): Promise<TransactionSummary[]> {
       };
     }),
   );
+}
+
+export async function getTransactionSummaries(): Promise<TransactionSummary[]> {
+  return getTransactionSummariesWith(getRepository());
 }
 
 export async function getGlobalOverdueCount(): Promise<number> {
