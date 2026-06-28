@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AlertTriangle, LogOut } from "lucide-react";
 import { useAuth } from "./AuthProvider";
+import { useData } from "@/lib/data/DataProvider";
 import { ROLE_LABELS, type Permission } from "@/lib/domain/rbac";
 import { Avatar } from "@/components/ui";
 import { BrandMark } from "@/components/Brand";
@@ -18,6 +19,7 @@ const NAV: { href: string; label: string; perm?: Permission }[] = [
   { href: "/tasks", label: "Tasks", perm: "transaction:read" },
   { href: "/calendar", label: "Calendar", perm: "transaction:read" },
   { href: "/contacts", label: "Contacts", perm: "transaction:read" },
+  { href: "/inbox", label: "Inbox", perm: "transaction:read" },
   { href: "/reports", label: "Reports", perm: "ai_summary:read" },
   { href: "/admin", label: "Admin", perm: "user:manage" },
 ];
@@ -25,6 +27,8 @@ const NAV: { href: string; label: string; perm?: Permission }[] = [
 export function TopNav({ overdueCount }: { overdueCount: number }) {
   const pathname = usePathname();
   const { currentUser, can, logout } = useAuth();
+  const { messages } = useData();
+  const unread = messages.filter((m) => m.direction === "from_seller" && !m.readAt).length;
   if (!currentUser) return null;
 
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
@@ -76,11 +80,16 @@ export function TopNav({ overdueCount }: { overdueCount: number }) {
               key={item.href}
               href={item.href}
               className={cn(
-                "inline-flex shrink-0 items-center rounded-md px-3 py-1.5 text-xs font-medium leading-none transition-colors",
+                "inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium leading-none transition-colors",
                 active ? "bg-ink-900 text-canvas" : "text-ink-600 hover:bg-ink-100/60 hover:text-ink-900",
               )}
             >
               {item.label}
+              {item.href === "/inbox" && unread > 0 && (
+                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-clay px-1 text-[10px] font-semibold text-paper">
+                  {unread}
+                </span>
+              )}
             </Link>
           );
         })}
