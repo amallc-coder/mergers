@@ -33,6 +33,11 @@ const ROOT_FOLDER = Deno.env.get("SHAREPOINT_ROOT_FOLDER") ?? "";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
+// Anthropic (Claude) — content-based document classification engine.
+const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const ANTHROPIC_MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-opus-4-8";
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+
 // Lightweight access gate. Because the frontend is a public static site, the
 // Supabase anon key is visible in the JS bundle and would otherwise let anyone
 // invoke this function. Callers must include an `appKey` in the request body whose
@@ -61,6 +66,34 @@ const CATEGORY_FOLDERS = [
   "09. Other",
   "10. Unclassified Review Queue",
 ];
+
+const REVIEW_FOLDER = "10. Unclassified Review Queue";
+
+// Guidance the classifier sees for each diligence category.
+const CATEGORY_GUIDE = [
+  "01. Logins Passwords — login credentials, portal access, usernames/passwords, account/login screenshots",
+  "02. Finance Accounting — P&L, balance sheets, tax returns, bank/credit-card statements, general ledger, QuickBooks files",
+  "03. Revenue Cycle Billing — AR aging, claims, EOBs/remittances, fee schedules, payer mix, denials, billing/collections reports",
+  "04. Providers Credentialing — medical licenses, DEA, board certifications, CVs, malpractice/insurance, provider rosters, credentialing",
+  "05. Operations Clinical — clinical workflows, schedules, service lines, equipment, supplies, clinical/quality reports",
+  "06. HR Payroll — employee rosters, payroll registers, W-2s/W-4s, benefits, PTO, employment/contractor agreements, org charts",
+  "07. IT EMR Systems — IT systems, EMR/PM software, network/hardware inventory, software licenses, IT vendors",
+  "08. Legal Contracts Business — leases, contracts, formation docs, NDAs, operating agreements, business licenses, insurance policies",
+  "09. Other — identifiable but does not fit the categories above",
+  "10. Unclassified Review Queue — unreadable, ambiguous, or low-confidence; needs a human to place it",
+].join("\n");
+
+const CLASSIFY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["category", "confidence", "documentType", "reasoning"],
+  properties: {
+    category: { type: "string", enum: CATEGORY_FOLDERS },
+    confidence: { type: "number" },
+    documentType: { type: "string" },
+    reasoning: { type: "string" },
+  },
+};
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -306,6 +339,222 @@ async function listDataRooms(token: string, driveId: string) {
   return { rootFolder: ROOT_FOLDER || "(library root)", count: dataRooms.length, dataRooms };
 }
 
+// ── AI classification (Claude Opus 4.8) ─────────────────────────
+
+function extFor(name: string) {
+  return (name.split(".").pop() ?? "").toLowerCase();
+}
+
+function mediaKind(ext: string): { kind: "pdf" | "image" | "text" | "none"; mediaType: string } {
+  if (ext === "pdf") return { kind: "pdf", mediaType: "application/pdf" };
+  if (ext === "png") return { kind: "image", mediaType: "image/png" };
+  if (ext === "jpg" || ext === "jpeg") return { kind: "image", mediaType: "image/jpeg" };
+  if (ext === "gif") return { kind: "image", mediaType: "image/gif" };
+  if (ext === "webp") return { kind: "image", mediaType: "image/webp" };
+  if (ext === "txt" || ext === "csv") return { kind: "text", mediaType: "text/plain" };
+  return { kind: "none", mediaType: "" };
+}
+
+function bytesToB64(bytes: Uint8Array): string {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+async function downloadBytes(token: string, driveId: string, itemId: string, maxBytes: number): Promise<Uint8Array | null> {
+  const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  return buf.length > maxBytes ? null : buf;
+}
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) || 1 }, worker));
+  return out;
+}
+
+function classifyPrompt(name: string, parentName: string, readable: boolean, ext: string, textPreview: string): string {
+  const lines = [
+    "Classify this medical-practice acquisition data-room file into exactly ONE diligence category.",
+    "",
+    `File name: ${JSON.stringify(name)}`,
+    `Current folder: ${JSON.stringify(parentName)}`,
+  ];
+  if (readable && textPreview) lines.push("", "File text (first part):", textPreview);
+  else if (readable) {
+    lines.push("", "The file content is attached above. Classify from what it ACTUALLY contains — the filename may be wrong or generic (e.g. image1.png).");
+  } else {
+    lines.push("", `The content could not be read (file type: ${ext}). Classify from the name, folder, and file type.`);
+  }
+  lines.push(
+    "",
+    "Categories:",
+    CATEGORY_GUIDE,
+    "",
+    'Rules: decide from content first. "confidence" is 0 to 1. If the file is genuinely ambiguous, unreadable, or could fit multiple categories, choose "10. Unclassified Review Queue" and explain why. "documentType" is a short label of what the file actually is (e.g. "Bank statement", "Payroll register", "Driver\'s license").',
+  );
+  return lines.join("\n");
+}
+
+/** Classify a single file by its actual content via Claude. */
+async function classifyOne(token: string, driveId: string, item: { id: string; name: string; size: number; parentName: string }) {
+  const ext = extFor(item.name);
+  const media = mediaKind(ext);
+  const blocks: Record<string, unknown>[] = [];
+  let readable = false;
+  let textPreview = "";
+
+  if (media.kind !== "none" && item.size <= 8_000_000) {
+    const bytes = await downloadBytes(token, driveId, item.id, 8_000_000);
+    if (bytes) {
+      if (media.kind === "pdf") {
+        blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } });
+        readable = true;
+      } else if (media.kind === "image") {
+        blocks.push({ type: "image", source: { type: "base64", media_type: media.mediaType, data: bytesToB64(bytes) } });
+        readable = true;
+      } else if (media.kind === "text") {
+        textPreview = new TextDecoder().decode(bytes.slice(0, 20000));
+        readable = true;
+      }
+    }
+  }
+
+  blocks.push({ type: "text", text: classifyPrompt(item.name, item.parentName, readable, ext, textPreview) });
+
+  try {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 800,
+        output_config: { format: { type: "json_schema", schema: CLASSIFY_SCHEMA } },
+        messages: [{ role: "user", content: blocks }],
+      }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${res.status}: ${t.slice(0, 300)}`, readable, error: `claude_${res.status}` };
+    }
+    const json = await res.json();
+    if (json.stop_reason === "refusal") {
+      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(refusal)", reasoning: "model declined to classify", readable, error: "refusal" };
+    }
+    const textBlock = (json.content ?? []).find((b: Record<string, unknown>) => b.type === "text");
+    const raw = String(textBlock?.text ?? "");
+    const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+    return {
+      category: CATEGORY_FOLDERS.includes(parsed.category) ? parsed.category : REVIEW_FOLDER,
+      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+      documentType: String(parsed.documentType ?? ""),
+      reasoning: String(parsed.reasoning ?? ""),
+      readable,
+    };
+  } catch (e) {
+    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, error: "exception" };
+  }
+}
+
+/**
+ * Classify (and optionally move) the loose files in a data room by their actual
+ * content. dryRun=true classifies without moving (for review). Process in slices
+ * via offset/limit to stay within request time limits.
+ */
+async function classifyDataRoom(
+  token: string,
+  driveId: string,
+  practiceName: string,
+  opts: { dryRun?: boolean; offset?: number; limit?: number },
+) {
+  if (!ANTHROPIC_API_KEY) return { error: "ANTHROPIC_API_KEY is not set" };
+  const dryRun = opts.dryRun ?? false;
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? 8;
+
+  const dataRoomName = `Data Room - ${practiceName}`;
+  const root = await getByPath(token, driveId, dataRoomPath(dataRoomName));
+  if (!root) return { found: false, practiceName };
+
+  const catSet = new Set(CATEGORY_FOLDERS.map((c) => c.toLowerCase()));
+
+  // Collect loose files (anything not already inside a category folder).
+  const loose: { id: string; name: string; size: number; parentName: string }[] = [];
+  async function walk(itemId: string, parentName: string) {
+    let next: string | null = `/drives/${driveId}/items/${itemId}/children?$top=200&$select=id,name,size,file,folder`;
+    while (next) {
+      const page = await graph(token, next);
+      for (const c of page.value ?? []) {
+        if (c.folder) {
+          if (catSet.has(String(c.name).toLowerCase())) continue;
+          await walk(c.id, c.name);
+        } else if (c.file) {
+          loose.push({ id: c.id, name: c.name, size: c.size ?? 0, parentName });
+        }
+      }
+      next = page["@odata.nextLink"] ?? null;
+    }
+  }
+  await walk(root.id, dataRoomName);
+  loose.sort((a, b) => a.name.localeCompare(b.name));
+
+  const total = loose.length;
+  const slice = loose.slice(offset, offset + limit);
+
+  // For real runs, make sure the destination category folders exist up front.
+  const catId: Record<string, string> = {};
+  if (!dryRun && slice.length > 0) {
+    for (const cat of CATEGORY_FOLDERS) {
+      const f = await ensureChildFolder(token, driveId, root.id, cat, `${dataRoomPath(dataRoomName)}/${cat}`);
+      catId[cat] = f.id;
+    }
+  }
+
+  const results = await mapLimit(slice, 4, async (f) => {
+    const c = await classifyOne(token, driveId, f);
+    const needsReview = c.category === REVIEW_FOLDER || (c.confidence ?? 0) < 0.6 || !!(c as Record<string, unknown>).error;
+    const target = needsReview ? REVIEW_FOLDER : c.category;
+    let moved = false;
+    if (!dryRun && catId[target]) {
+      try {
+        await moveDocument(token, driveId, f.id, catId[target]);
+        moved = true;
+      } catch (_e) {
+        moved = false;
+      }
+    }
+    return {
+      name: f.name,
+      folder: f.parentName,
+      sizeBytes: f.size,
+      readable: c.readable,
+      documentType: c.documentType,
+      category: c.category,
+      confidence: c.confidence,
+      needsReview,
+      target,
+      moved,
+      reasoning: c.reasoning,
+      error: (c as Record<string, unknown>).error,
+    };
+  });
+
+  return { found: true, practiceName, total, offset, limit, done: offset + limit >= total, dryRun, results };
+}
+
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
 async function deltaSync(token: string, driveId: string, deltaLink?: string) {
   const start = deltaLink ?? `/drives/${driveId}/root/delta`;
@@ -439,6 +688,16 @@ Deno.serve(async (req) => {
         break;
       case "listTree":
         result = await listTree(token, driveId, args.path ?? "");
+        break;
+      case "listDataRooms":
+        result = await listDataRooms(token, driveId);
+        break;
+      case "classifyDataRoom":
+        result = await classifyDataRoom(token, driveId, args.practiceName, {
+          dryRun: args.dryRun ?? false,
+          offset: args.offset ?? 0,
+          limit: args.limit ?? 8,
+        });
         break;
       case "moveDocument":
         result = await moveDocument(token, driveId, args.itemId, args.targetFolderId, args.newName);
