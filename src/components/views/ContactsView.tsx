@@ -20,7 +20,7 @@ const TYPES = [
 ];
 
 export function ContactsView() {
-  const { repo, source, people, contactLinks, communications, addContact, linkContact, unlinkContact } = useData();
+  const { repo, source, awaitingLive, people, contactLinks, communications, addContact, linkContact, unlinkContact } = useData();
   const [txs, setTxs] = useState<Transaction[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -36,7 +36,7 @@ export function ContactsView() {
   const txName = useMemo(() => Object.fromEntries((txs ?? []).map((t) => [t.id, t.practiceName])), [txs]);
   const live = source === "live";
 
-  if (!txs) {
+  if (!txs || awaitingLive) {
     return (
       <>
         <PageHeader title="Contacts" subtitle="Internal team, sellers, and external contacts across all deals" />

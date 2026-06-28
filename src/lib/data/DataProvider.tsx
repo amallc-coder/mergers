@@ -18,7 +18,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { DiligenceRepository } from "./repository";
 import { seedSnapshot } from "./seed-snapshot";
-import { snapshotRepository } from "./snapshot";
+import { snapshotRepository, type Snapshot } from "./snapshot";
 import { dataApi, isLiveBackend } from "./snapshot-client";
 import { hasAppKey, sharePoint, INTAKE_HOME } from "../sharepoint/client";
 import {
@@ -64,6 +64,9 @@ interface DataContextValue {
   alertRouting: AlertRoute[];
   /** True when a live backend is configured for this build. */
   liveConfigured: boolean;
+  /** True while the first live snapshot is still loading — views should show a
+   *  loading state rather than the empty/seed dataset (prevents the demo flash). */
+  awaitingLive: boolean;
   /** Re-fetch the live snapshot (no-op when not live). */
   refresh: () => void;
   /** Move a deal to a new stage (live only); refreshes the snapshot after. */
@@ -91,6 +94,31 @@ interface DataContextValue {
 
 const seedSnap = seedSnapshot();
 const seedRepo = snapshotRepository(seedSnap);
+
+// An empty dataset shown while the live snapshot is loading, so the seed/demo data
+// never flashes before the real data arrives. Views render their loading state
+// (driven by `awaitingLive`) instead of the sample deals.
+const emptySnap: Snapshot = {
+  org: seedSnap.org,
+  pipelineStages: DEFAULT_PIPELINE_STAGES,
+  people: [],
+  contactLinks: [],
+  communications: [],
+  alertRouting: [],
+  users: [],
+  transactions: [],
+  contacts: [],
+  requestItems: [],
+  documents: [],
+  metrics: [],
+  riskFlags: [],
+  tasks: [],
+  meetings: [],
+  comments: [],
+  activity: [],
+  sellerPortalUsers: [],
+};
+const emptyRepo = snapshotRepository(emptySnap);
 
 const DataContext = createContext<DataContextValue | null>(null);
 
@@ -124,6 +152,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     let cancelled = false;
+    // Clear any seed/demo data immediately so it never flashes under the live load.
+    // Views key off `awaitingLive` (status === "loading") to show a spinner instead.
+    setSource("seed");
+    setRepo(emptyRepo);
+    setPeople([]);
+    setContactLinks([]);
+    setCommunications([]);
+    setAlertRouting([]);
     setStatus("loading");
     setError(null);
     dataApi
@@ -254,17 +290,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [requireLive, refresh],
   );
 
+  // We're awaiting the first live snapshot whenever a live fetch is in flight; while
+  // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
+  const awaitingLive = status === "loading";
+
   const value = useMemo<DataContextValue>(
     () => ({
       repo, source, status, error, pipelineStages,
       people, contactLinks, communications, alertRouting,
-      liveConfigured, refresh, setStage, createTransaction, provisionDataRoom,
+      liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
     }),
     [
       repo, source, status, error, pipelineStages,
       people, contactLinks, communications, alertRouting,
-      liveConfigured, refresh, setStage, createTransaction, provisionDataRoom,
+      liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
     ],
   );
@@ -292,7 +332,7 @@ export function useRepo(): DiligenceRepository {
 export function useRepoData<T>(
   loader: (repo: DiligenceRepository) => Promise<T>,
 ): { data: T | null; loading: boolean; source: Source } {
-  const { repo, source } = useData();
+  const { repo, source, awaitingLive } = useData();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -315,5 +355,7 @@ export function useRepoData<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo]);
 
-  return { data, loading, source };
+  // While the first live snapshot is still loading the repo is empty; report
+  // loading so pages show a spinner instead of an empty (or seed) dataset.
+  return { data, loading: loading || awaitingLive, source };
 }

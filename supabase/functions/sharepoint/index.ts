@@ -1011,6 +1011,433 @@ async function whoami(token: string) {
   };
 }
 
+// ── KPI extraction (Claude Opus 4.8) ───────────────────────────────────────────
+//
+// Read the actual financial / revenue-cycle / payroll documents in a data room and
+// extract a structured set of metrics, then consolidate them into the headline KPIs
+// the dashboard reads. Two passes:
+//   1) Per document — Claude reads the file and returns granular "reading" metrics
+//      (one row per value per period): the evidence trail.
+//   2) Per transaction — deterministic consolidation derives the single headline
+//      value for each display KPI (latest period, computed ratios).
+// Reading keys and display keys are deliberately DISJOINT so the dashboard's
+// metricLookup (which keeps one row per key) always resolves to the consolidated value.
+
+const nowISO = () => new Date().toISOString();
+
+// Granular values the model may read off a document, each mapped to the diligence
+// category it belongs to and the unit it must be normalized to.
+const READING_META: Record<string, { category: string; name: string; unit: string }> = {
+  rev_gross:        { category: "finance_accounting",      name: "Gross revenue",        unit: "USD" },
+  rev_net:          { category: "finance_accounting",      name: "Net revenue",          unit: "USD" },
+  ebitda_val:       { category: "finance_accounting",      name: "EBITDA",               unit: "USD" },
+  adj_ebitda_val:   { category: "finance_accounting",      name: "Adjusted EBITDA",      unit: "USD" },
+  net_income_val:   { category: "finance_accounting",      name: "Net income",           unit: "USD" },
+  payroll_val:      { category: "finance_accounting",      name: "Payroll expense",      unit: "USD" },
+  rent_val:         { category: "finance_accounting",      name: "Rent expense",         unit: "USD" },
+  opex_val:         { category: "finance_accounting",      name: "Operating expenses",   unit: "USD" },
+  addbacks_val:     { category: "finance_accounting",      name: "Add-backs",            unit: "USD" },
+  debt_val:         { category: "finance_accounting",      name: "Debt obligations",     unit: "USD" },
+  ar_total:         { category: "revenue_cycle_billing",   name: "Total AR",             unit: "USD" },
+  ar_days:          { category: "revenue_cycle_billing",   name: "Days in AR (stated)",  unit: "days" },
+  denial_pct:       { category: "revenue_cycle_billing",   name: "Denial rate (stated)", unit: "percent" },
+  denied_claims:    { category: "revenue_cycle_billing",   name: "Denied claims",        unit: "count" },
+  total_claims:     { category: "revenue_cycle_billing",   name: "Total claims",         unit: "count" },
+  charges_val:      { category: "revenue_cycle_billing",   name: "Charges",              unit: "USD" },
+  payments_val:     { category: "revenue_cycle_billing",   name: "Payments",             unit: "USD" },
+  patients_active:  { category: "revenue_cycle_billing",   name: "Active patients",      unit: "count" },
+  visits_annual:    { category: "revenue_cycle_billing",   name: "Annual visits",        unit: "count" },
+  employees_total:  { category: "hr_payroll",              name: "Total employees",      unit: "count" },
+  providers_total:  { category: "providers_credentialing", name: "Total providers",      unit: "count" },
+  physicians_total: { category: "providers_credentialing", name: "Physician count",      unit: "count" },
+  locations_total:  { category: "operations_clinical",     name: "Total locations",      unit: "count" },
+};
+const READING_KEYS = Object.keys(READING_META);
+
+const EXTRACT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["isFinancial", "docPeriod", "summary", "metrics"],
+  properties: {
+    isFinancial: { type: "boolean" },
+    docPeriod: { type: "string" },
+    summary: { type: "string" },
+    metrics: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "value", "period", "confidence"],
+        properties: {
+          key: { type: "string", enum: READING_KEYS },
+          value: { type: "number" },
+          period: { type: "string" },
+          confidence: { type: "number" },
+          page: { type: ["integer", "null"] },
+          note: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+const EXTRACT_TOOL = {
+  name: "extract_financials",
+  description: "Record the financial / revenue-cycle / staffing metrics read directly from this data-room document.",
+  strict: true,
+  input_schema: EXTRACT_SCHEMA,
+};
+
+function extractPrompt(name: string, practiceName: string, readable: boolean, ext: string, textPreview: string): string {
+  const lines = [
+    "You are extracting financial diligence metrics for a medical-practice acquisition.",
+    `Practice (acquisition target): ${JSON.stringify(practiceName)}`,
+    `File name: ${JSON.stringify(name)}`,
+  ];
+  if (readable && textPreview) lines.push("", "File text (first part):", textPreview);
+  else if (readable) lines.push("", "The document content is attached above — read the ACTUAL numbers from it.");
+  else lines.push("", `The content could not be read (file type: ${ext}). Return isFinancial=false and an empty metrics array.`);
+  lines.push(
+    "",
+    "Extract ONLY values you can actually read in the document. Allowed keys:",
+    READING_KEYS.map((k) => `- ${k}: ${READING_META[k].name} (${READING_META[k].unit})`).join("\n"),
+    "",
+    "Rules:",
+    '- Normalize money to absolute US dollars ("$1.2M" -> 1200000, "1,234" -> 1234). No symbols, no thousands separators.',
+    "- Percentages as a number out of 100 (7.5 means 7.5%). Days and counts as plain numbers.",
+    '- If the document shows several years/periods, emit ONE row PER period, with that period in "period" (e.g. "FY2024", "2025", "T12 2026-03", "YTD 2026").',
+    '- "docPeriod" is the primary period the document covers.',
+    '- Only emit a row when you are reading a real figure — never guess or infer. "confidence" is 0..1.',
+    "- If the file is not a financial / billing / payroll document (e.g. a license, a photo, a contract), set isFinancial=false and return an empty metrics array.",
+    '- "summary" is one sentence describing what the document shows.',
+  );
+  return lines.join("\n");
+}
+
+/** One Claude extraction call over the given content blocks, retrying transient errors. */
+async function callClaudeExtract(
+  blocks: Record<string, unknown>[],
+): Promise<{ ok: boolean; status: number; json?: Record<string, unknown>; text?: string }> {
+  let status = 0;
+  let text = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2048,
+        tools: [EXTRACT_TOOL],
+        tool_choice: { type: "tool", name: "extract_financials" },
+        messages: [{ role: "user", content: blocks }],
+      }),
+    });
+    if (res.ok) return { ok: true, status: res.status, json: await res.json() };
+    status = res.status;
+    text = await res.text();
+    if (!RETRYABLE.has(status)) break;
+    await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+  }
+  return { ok: false, status, text };
+}
+
+/** Extract granular metric rows from a single document by reading its actual content. */
+async function extractDocMetrics(
+  token: string,
+  driveId: string,
+  doc: { spId: string; documentId: string; name: string; size: number },
+  practiceName: string,
+) {
+  const ext = extFor(doc.name);
+  const media = mediaKind(ext);
+  const cap = READ_CAP[media.kind];
+  let attachment: Record<string, unknown> | null = null;
+  let readable = false;
+  let textPreview = "";
+
+  if (media.kind === "office") {
+    const bytes = await downloadConverted(token, driveId, doc.spId, cap);
+    if (bytes) {
+      attachment = { type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } };
+      readable = true;
+    }
+  } else if (media.kind !== "none") {
+    if (doc.size <= cap || doc.size === 0) {
+      const bytes = await downloadBytes(token, driveId, doc.spId, cap);
+      if (bytes) {
+        if (media.kind === "pdf") {
+          attachment = { type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } };
+          readable = true;
+        } else if (media.kind === "image") {
+          attachment = { type: "image", source: { type: "base64", media_type: media.mediaType, data: bytesToB64(bytes) } };
+          readable = true;
+        } else if (media.kind === "text") {
+          textPreview = new TextDecoder().decode(bytes.slice(0, 40000));
+          readable = true;
+        }
+      }
+    }
+  }
+
+  const blocks: Record<string, unknown>[] = [];
+  if (attachment) blocks.push(attachment);
+  blocks.push({ type: "text", text: extractPrompt(doc.name, practiceName, readable, ext, textPreview) });
+
+  let resp = await callClaudeExtract(blocks);
+  // If the attachment was rejected (too large / too many pages), retry name-only so the
+  // call doesn't fail outright — it just won't read content for this file.
+  if (!resp.ok && attachment && (resp.status === 400 || resp.status === 413)) {
+    resp = await callClaudeExtract([{ type: "text", text: extractPrompt(doc.name, practiceName, false, ext, "") }]);
+  }
+  if (!resp.ok) return { ok: false, error: `claude_${resp.status}`, isFinancial: false, summary: "", rows: [] as Record<string, unknown>[] };
+
+  const json = resp.json!;
+  if (json.stop_reason === "refusal") return { ok: false, error: "refusal", isFinancial: false, summary: "", rows: [] };
+  const tu = ((json.content as Record<string, unknown>[]) ?? []).find(
+    (b) => b.type === "tool_use" && b.name === "extract_financials",
+  );
+  const input = ((tu?.input as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  const isFinancial = input.isFinancial === true;
+  const summary = String(input.summary ?? "");
+  const docPeriod = String(input.docPeriod ?? "");
+  const raw = Array.isArray(input.metrics) ? (input.metrics as Record<string, unknown>[]) : [];
+  const rows = raw
+    .filter((m) => READING_META[String(m.key)] && typeof m.value === "number" && isFinite(m.value as number))
+    .map((m) => {
+      const meta = READING_META[String(m.key)];
+      const period = (String(m.period ?? "") || docPeriod || "unknown").slice(0, 60);
+      const conf = typeof m.confidence === "number" ? Math.max(0, Math.min(1, m.confidence)) : 0.5;
+      return {
+        metric_key: String(m.key),
+        metric_name: meta.name,
+        category: meta.category,
+        metric_value_numeric: m.value as number,
+        metric_value_text: null,
+        metric_unit: meta.unit,
+        period,
+        source_document_id: doc.documentId,
+        source_document_name: doc.name,
+        source_page: Number.isInteger(m.page) ? (m.page as number) : null,
+        confidence_score: conf,
+        requires_human_review: conf < 0.7,
+        source: "ai",
+      } as Record<string, unknown>;
+    });
+  return { ok: true, isFinancial, summary, docPeriod, rows };
+}
+
+// Filename relevance — prioritize the documents that actually carry headline numbers
+// (P&Ls, balance sheets, AR aging, denial / reimbursement reports, payroll) over tax
+// schedules and worksheets, so a capped slice still hits the values that matter.
+function relevanceScore(name: string): number {
+  const s = name.toLowerCase();
+  let score = 0;
+  const kws: [string, number][] = [
+    // P&Ls / income statements carry the headline revenue + EBITDA — rank them top.
+    ["p&l", 8], ["p & l", 8], ["pnl", 7], ["profit", 8], ["income statement", 8], ["income stmt", 7],
+    ["trailing", 8], ["t12", 8], ["t-12", 8], ["ttm", 7],
+    // Revenue-cycle headline reports (AR, denials, collections, reimbursement).
+    ["aging", 6], ["a/r", 6], ["ar ", 4], ["denial", 6], ["denail", 6], ["reimbursement", 6],
+    ["collection", 6], ["yearly summary", 6], ["revenue", 5], ["payer", 3], ["claims", 4],
+    // Supporting financials / staffing.
+    ["balance sheet", 4], ["financial", 4], ["payroll", 5], ["employee", 4], ["census", 3],
+    ["summary", 2], ["proc code", 2], ["analysis", 2],
+  ];
+  for (const [kw, w] of kws) if (s.includes(kw)) score += w;
+  if (/(schedule [a-z]|form 8879|federal worksheet|worksheet|8879|w-?9|signature)/.test(s)) score -= 4;
+  return score;
+}
+
+function parseYear(p: string): number {
+  const m = (p || "").match(/20\d{2}/);
+  return m ? parseInt(m[0], 10) : 0;
+}
+function periodRank(p: string): number {
+  const s = (p || "").toLowerCase();
+  let rank = parseYear(s) * 100;
+  if (/t-?12|trailing|ttm/.test(s)) rank += 50;
+  if (/ytd|to.?date/.test(s)) rank += 20;
+  const mm = s.match(/20\d{2}[-/ ](\d{1,2})/);
+  if (mm) rank += Math.min(12, parseInt(mm[1], 10));
+  return rank;
+}
+
+interface RVal { value: number; period: string; conf: number; srcId: string | null }
+
+/** Derive the single headline value for each display KPI from the granular reading rows. */
+function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const byKey = new Map<string, RVal[]>();
+  for (const r of rows) {
+    const key = String(r.metric_key);
+    const value = Number(r.metric_value_numeric);
+    if (!isFinite(value)) continue;
+    const e: RVal = { value, period: String(r.period ?? ""), conf: Number(r.confidence_score ?? 0.5), srcId: (r.source_document_id as string) ?? null };
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key)!.push(e);
+  }
+  const latest = (key: string): RVal | undefined => {
+    const arr = byKey.get(key);
+    if (!arr || !arr.length) return undefined;
+    return arr.slice().sort((a, b) => periodRank(b.period) - periodRank(a.period) || b.conf - a.conf)[0];
+  };
+
+  const out: Record<string, unknown>[] = [];
+  const add = (
+    key: string, name: string, category: string, unit: string,
+    value: number | undefined, srcPeriod: string, srcId: string | null,
+    conf: number, derived: boolean, lo = -Infinity, hi = Infinity,
+  ) => {
+    if (value === undefined || value === null || !isFinite(value) || value < lo || value > hi) return;
+    const rounded = unit === "USD" ? Math.round(value) : unit === "count" ? Math.round(value) : Math.round(value * 10) / 10;
+    out.push({
+      metric_key: key,
+      metric_name: srcPeriod ? `${name} (${srcPeriod})` : name,
+      category,
+      metric_value_numeric: rounded,
+      metric_value_text: null,
+      metric_unit: unit,
+      period: "Consolidated",
+      source_document_id: srcId,
+      source_document_name: null,
+      source_page: null,
+      confidence_score: Math.max(0, Math.min(1, conf)),
+      requires_human_review: derived || conf < 0.7,
+      source: "ai",
+    });
+  };
+
+  const revNet = latest("rev_net");
+  const revGross = latest("rev_gross");
+  const t12 = revNet ?? revGross;
+  const ebitda = latest("ebitda_val") ?? latest("adj_ebitda_val");
+  const adj = latest("adj_ebitda_val");
+  const payroll = latest("payroll_val");
+  const ar = latest("ar_total");
+  const arDays = latest("ar_days");
+  const denial = latest("denial_pct");
+  const denied = latest("denied_claims");
+  const totalClaims = latest("total_claims");
+  const charges = latest("charges_val");
+  const payments = latest("payments_val");
+  const visits = latest("visits_annual");
+  const patients = latest("patients_active");
+  const employees = latest("employees_total");
+  const providers = latest("providers_total");
+  const revForRatio = revNet ?? t12;
+
+  if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
+  if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
+  if (ebitda) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
+  if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
+  if (ebitda && revForRatio && revForRatio.value > 0)
+    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", (ebitda.value / revForRatio.value) * 100, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, revForRatio.conf) * 0.95, true, -100, 100);
+  if (payroll && revForRatio && revForRatio.value > 0)
+    add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (payroll.value / revForRatio.value) * 100, payroll.period, payroll.srcId, Math.min(payroll.conf, revForRatio.conf) * 0.95, true, 0, 200);
+
+  // YoY revenue growth from two fiscal years of net revenue.
+  const revRows = (byKey.get("rev_net") ?? []).filter((r) => parseYear(r.period) > 0);
+  const byYear = new Map<number, RVal>();
+  for (const r of revRows) {
+    const y = parseYear(r.period);
+    const ex = byYear.get(y);
+    if (!ex || r.conf > ex.conf) byYear.set(y, r);
+  }
+  const years = [...byYear.keys()].sort((a, b) => b - a);
+  if (years.length >= 2) {
+    const cur = byYear.get(years[0])!;
+    const prev = byYear.get(years[1])!;
+    if (prev.value > 0)
+      add("yoy_revenue_growth", "YoY revenue growth", "finance_accounting", "percent", ((cur.value / prev.value) - 1) * 100, `${years[1]}->${years[0]}`, cur.srcId, Math.min(cur.conf, prev.conf) * 0.95, true, -100, 500);
+  }
+
+  if (ar) add("total_ar", "Total AR", "revenue_cycle_billing", "USD", ar.value, ar.period, ar.srcId, ar.conf, false, 0);
+  if (arDays) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", arDays.value, arDays.period, arDays.srcId, arDays.conf, false, 0, 400);
+  else if (ar && t12 && t12.value > 0) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", ar.value / (t12.value / 365), ar.period, ar.srcId, Math.min(ar.conf, t12.conf) * 0.9, true, 0, 400);
+  if (denial) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", denial.value, denial.period, denial.srcId, denial.conf, false, 0, 100);
+  else if (denied && totalClaims && totalClaims.value > 0) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", (denied.value / totalClaims.value) * 100, denied.period, denied.srcId, Math.min(denied.conf, totalClaims.conf) * 0.9, true, 0, 100);
+  if (charges && payments && charges.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (payments.value / charges.value) * 100, payments.period, payments.srcId, Math.min(charges.conf, payments.conf) * 0.95, true, 0, 200);
+  if (visits) add("annual_visit_volume", "Annual visit volume", "revenue_cycle_billing", "count", visits.value, visits.period, visits.srcId, visits.conf, false, 0);
+  if (patients) add("total_patients_emr", "Total patients in EMR", "revenue_cycle_billing", "count", patients.value, patients.period, patients.srcId, patients.conf, false, 0);
+  if (employees) add("total_employees", "Total employees", "hr_payroll", "count", employees.value, employees.period, employees.srcId, employees.conf, false, 0);
+  if (providers) add("total_providers", "Total providers", "providers_credentialing", "count", providers.value, providers.period, providers.srcId, providers.conf, false, 0);
+
+  return out;
+}
+
+/**
+ * Extract financial KPIs for one transaction: read a relevance-ranked slice of its
+ * finance / billing / payroll documents, upsert the granular reading rows, then
+ * re-consolidate the headline display KPIs from ALL reading rows stored so far.
+ * Idempotent and re-runnable; slice via offset/limit to stay inside the time limit.
+ */
+async function extractMetrics(
+  token: string,
+  driveId: string,
+  args: { practiceName?: string; transactionId?: string; offset?: number; limit?: number },
+) {
+  if (!ANTHROPIC_API_KEY) return { error: "ANTHROPIC_API_KEY is not set" };
+
+  let txId = args.transactionId ? String(args.transactionId) : "";
+  let practiceName = args.practiceName ? String(args.practiceName) : "";
+  if (!txId && practiceName) {
+    const t = await dbGet(`transactions?practice_name=eq.${encodeURIComponent(practiceName)}&select=id,practice_name`);
+    if (!t.length) return { found: false, practiceName };
+    txId = String(t[0].id);
+    practiceName = String(t[0].practice_name);
+  } else if (txId && !practiceName) {
+    const t = await dbGet(`transactions?id=eq.${txId}&select=practice_name`);
+    practiceName = t.length ? String(t[0].practice_name) : "";
+  }
+  if (!txId) return { error: "transactionId or practiceName required" };
+
+  const docs = await dbGet(
+    `documents?transaction_id=eq.${txId}&category=in.(finance_accounting,revenue_cycle_billing,hr_payroll)` +
+      `&sharepoint_file_id=not.is.null&select=id,file_name,size_bytes,sharepoint_file_id,category`,
+  );
+  const scored = docs
+    .map((d) => ({ d, score: relevanceScore(String(d.file_name)) }))
+    .sort((a, b) => b.score - a.score || String(a.d.file_name).localeCompare(String(b.d.file_name)));
+  const offset = args.offset ?? 0;
+  const limit = args.limit ?? 5;
+  const slice = scored.slice(offset, offset + limit);
+
+  const docResults = await mapLimit(slice, 2, async ({ d }) => {
+    const r = await extractDocMetrics(
+      token, driveId,
+      { spId: String(d.sharepoint_file_id), documentId: String(d.id), name: String(d.file_name), size: Number(d.size_bytes ?? 0) },
+      practiceName,
+    );
+    return { file: String(d.file_name), ...r };
+  });
+
+  const readingRows = docResults.flatMap((r) =>
+    (r.rows ?? []).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() })),
+  );
+  if (readingRows.length) await dbUpsert("ai_extracted_metrics", readingRows, "transaction_id,metric_key,period");
+
+  // Re-consolidate from every reading row stored for this transaction (not just this slice).
+  const allReading = await dbGet(
+    `ai_extracted_metrics?transaction_id=eq.${txId}&source=eq.ai&metric_key=in.(${READING_KEYS.join(",")})` +
+      `&select=metric_key,metric_value_numeric,period,confidence_score,source_document_id`,
+  );
+  const displayRows = consolidate(allReading).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
+  if (displayRows.length) await dbUpsert("ai_extracted_metrics", displayRows, "transaction_id,metric_key,period");
+
+  const totalDocs = scored.length;
+  return {
+    practiceName,
+    transactionId: txId,
+    totalFinancialDocs: totalDocs,
+    processed: slice.length,
+    offset,
+    limit,
+    nextOffset: offset + slice.length < totalDocs ? offset + slice.length : null,
+    readingRowsWritten: readingRows.length,
+    displayRowsWritten: displayRows.length,
+    docs: docResults.map((r) => ({ file: r.file, isFinancial: r.isFinancial, metrics: (r.rows ?? []).length, summary: r.summary, error: (r as Record<string, unknown>).error })),
+  };
+}
+
 // ── HTTP entry ──────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -1120,6 +1547,14 @@ Deno.serve(async (req) => {
         break;
       case "syncDocuments":
         result = await syncDocuments(token, driveId, { practiceName: args.practiceName });
+        break;
+      case "extractMetrics":
+        result = await extractMetrics(token, driveId, {
+          practiceName: args.practiceName,
+          transactionId: args.transactionId,
+          offset: args.offset ?? 0,
+          limit: args.limit ?? 5,
+        });
         break;
       case "subscribe":
         result = await subscribeWebhook(token, driveId, args.notificationUrl);

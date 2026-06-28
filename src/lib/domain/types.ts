@@ -466,8 +466,9 @@ export interface Transaction {
   organizationId: string;
   name: string;
   practiceName: string;
-  specialty: string;
-  state: string;
+  /** Optional — live deals sourced from SharePoint may not have these set yet. */
+  specialty: string | null;
+  state: string | null;
   locationsCount: number;
   providersCount: number;
   /** Config-driven pipeline stage label (see pipeline_stages). */

@@ -15,7 +15,7 @@ import { getTransactionSummariesWith, type TransactionSummary } from "@/lib/sele
 import { txHref } from "@/components/views/shared";
 
 export function DealPipeline() {
-  const { repo, source, status, error } = useData();
+  const { repo, source, status, error, awaitingLive } = useData();
   const [summaries, setSummaries] = useState<TransactionSummary[] | null>(null);
   const [docCounts, setDocCounts] = useState<Record<string, number>>({});
 
@@ -66,7 +66,7 @@ export function DealPipeline() {
         )}
       </div>
 
-      {!summaries ? (
+      {!summaries || awaitingLive ? (
         <div className="flex items-center gap-2 py-10 text-ink-400">
           <Loader2 size={16} className="animate-spin" /> Loading deals…
         </div>
