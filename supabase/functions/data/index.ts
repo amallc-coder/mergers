@@ -207,6 +207,26 @@ async function deliverEmail(
   }
 }
 
+/** Mark all unread messages on a transaction as read (newest-first inbox view). */
+async function markRead(transactionId: string): Promise<string> {
+  const now = new Date().toISOString();
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/messages?transaction_id=eq.${encodeURIComponent(transactionId)}&read_at=is.null`,
+    {
+      method: "PATCH",
+      headers: {
+        apikey: SERVICE_ROLE,
+        Authorization: `Bearer ${SERVICE_ROLE}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({ read_at: now }),
+    },
+  );
+  if (!res.ok) throw new Error(`mark read failed (${res.status}): ${await res.text()}`);
+  return now;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "POST only" }, 405);
@@ -357,6 +377,96 @@ Deno.serve(async (req) => {
           summary: `Stage changed to ${stage}`,
         });
         return json({ ok: true, result: { id, stage, enteredAt: now } });
+      }
+      case "postMessage": {
+        const transactionId = String(args.transactionId ?? "");
+        const body = String(args.body ?? "").trim();
+        if (!transactionId || !body) return json({ ok: false, error: "transactionId and body required" }, 400);
+        const direction = ["internal", "to_seller", "from_seller"].includes(String(args.direction))
+          ? String(args.direction)
+          : "internal";
+        const authorType = direction === "from_seller" ? "seller" : String(args.authorType ?? "internal");
+        const authorName = typeof args.authorName === "string" && args.authorName
+          ? args.authorName
+          : authorType === "seller" ? "Seller" : "Deal team";
+        const subject = typeof args.subject === "string" ? args.subject : null;
+        const now = new Date().toISOString();
+        let status = direction === "to_seller" ? "queued" : "sent";
+        let emailError: string | null = null;
+        if (direction === "to_seller" && args.toEmail) {
+          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, subject ?? "Message from the deal team", body);
+          status = r.status === "sent" ? "sent" : "queued";
+          emailError = r.error;
+          await insertRow("communications", {
+            transaction_id: transactionId, contact_id: args.contactId ?? null,
+            to_email: String(args.toEmail), to_name: typeof args.toName === "string" ? args.toName : null,
+            subject: subject ?? "Message from the deal team", body, template_key: "message",
+            status: r.status, error: r.error, sent_at: r.status === "sent" ? now : null, created_by: authorName,
+          });
+        }
+        const inserted = await upsert("messages", {
+          transaction_id: transactionId, direction, subject, body,
+          related_metric_key: args.relatedMetricKey ?? null, related_task_id: args.relatedTaskId ?? null,
+          author_name: authorName, author_type: authorType, status,
+          read_at: direction === "from_seller" ? null : now,
+          created_by: authorName, created_at: now,
+        });
+        await insertRow("activity_events", {
+          transaction_id: transactionId, type: "message", actor_name: authorName,
+          summary: direction === "to_seller"
+            ? `Message sent to seller${status === "queued" ? " (queued for email)" : ""}`
+            : direction === "from_seller" ? "Seller replied" : "Internal note added",
+          detail: body.slice(0, 280),
+        });
+        return json({ ok: true, result: { message: inserted, status, error: emailError } });
+      }
+      case "raiseClarification": {
+        const transactionId = String(args.transactionId ?? "");
+        const question = String(args.question ?? args.body ?? "").trim();
+        if (!transactionId || !question) return json({ ok: false, error: "transactionId and question required" }, 400);
+        const metricKey = (args.metricKey ?? args.relatedMetricKey ?? null) as string | null;
+        const actorName = typeof args.actorName === "string" ? args.actorName : "Deal team";
+        const title = String(args.title ?? "Clarification needed").slice(0, 200);
+        const category = typeof args.category === "string" ? args.category : "other";
+        const now = new Date().toISOString();
+        const taskRows = (await upsert("tasks", {
+          transaction_id: transactionId, title, description: question,
+          status: "open", category, due_date: args.dueDate ?? null,
+        })) as Record<string, unknown>[];
+        const taskId = Array.isArray(taskRows) && taskRows[0] ? String(taskRows[0].id) : null;
+        let status = "queued";
+        if (args.toEmail) {
+          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, title, question);
+          status = r.status === "sent" ? "sent" : "queued";
+          await insertRow("communications", {
+            transaction_id: transactionId, contact_id: args.contactId ?? null,
+            to_email: String(args.toEmail), to_name: typeof args.toName === "string" ? args.toName : null,
+            subject: title, body: question, template_key: "clarification",
+            status: r.status, error: r.error, sent_at: r.status === "sent" ? now : null, created_by: actorName,
+          });
+        }
+        const msg = await upsert("messages", {
+          transaction_id: transactionId, direction: "to_seller", subject: title, body: question,
+          related_metric_key: metricKey, related_task_id: taskId,
+          author_name: actorName, author_type: "internal", status, read_at: now,
+          created_by: actorName, created_at: now,
+        });
+        await insertRow("activity_events", {
+          transaction_id: transactionId, type: "clarification_raised", actor_name: actorName,
+          summary: `Clarification raised${metricKey ? ` re: ${metricKey}` : ""}${status === "queued" ? " (queued for email)" : ""}`,
+          detail: question.slice(0, 280),
+        });
+        await insertRow("audit_logs", {
+          transaction_id: transactionId, actor_name: actorName, action: "clarification_raised",
+          target: String(metricKey ?? title), metadata: { taskId, status },
+        });
+        return json({ ok: true, result: { taskId, message: msg, status } });
+      }
+      case "markMessagesRead": {
+        const transactionId = String(args.transactionId ?? "");
+        if (!transactionId) return json({ ok: false, error: "transactionId required" }, 400);
+        const readAt = await markRead(transactionId);
+        return json({ ok: true, result: { readAt } });
       }
       case "sendMail": {
         // Compose + send (or queue) one email, logging it to communications.

@@ -6,6 +6,7 @@ import { DealScoreBadge, RiskBadge, ProgressBar } from "@/components/ui";
 import { Tabs, type TabDef } from "@/components/Tabs";
 import { DiligenceTracker } from "@/components/transaction/DiligenceTracker";
 import { AiAssistant } from "@/components/transaction/AiAssistant";
+import { DealMessages } from "@/components/messaging/DealMessages";
 import {
   ActivityPanel,
   AiSummaryPanel,
@@ -88,6 +89,15 @@ export function TransactionDetailView({ id }: { id: string }) {
           riskNarrative={riskNarrative}
           nowIso={nowIso}
         />
+      ),
+    },
+    {
+      key: "messages",
+      label: "Messages",
+      content: (
+        <div className="rounded-panel border border-ink-100 bg-paper p-4">
+          <DealMessages transactionId={tx.id} practiceName={tx.practiceName} />
+        </div>
       ),
     },
     { key: "tasks", label: "Tasks", badge: view.tasks.filter((t) => t.status !== "done").length, content: <TasksPanel view={view} userNames={userNames} /> },

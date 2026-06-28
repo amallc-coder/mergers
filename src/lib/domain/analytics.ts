@@ -185,6 +185,87 @@ interface MetricLookup {
   citation(key: string): string | undefined;
 }
 
+// ─────────────────────── KPI anomaly detection ───────────────────────
+
+export interface KpiAnomaly {
+  metricKey: string;
+  label: string;
+  value?: number;
+  severity: "warn" | "info";
+  /** What looks off about the figure. */
+  message: string;
+  /** A ready-to-send clarification question for the seller. */
+  suggestedQuestion: string;
+  /** The diligence category the clarification task should file under. */
+  category: CategoryKey;
+}
+
+/**
+ * Compare the extracted KPIs to market-expected bands and surface the ones that
+ * look off — so the team can dig in and raise a clarification with the seller.
+ * Pure: metrics in → anomalies out. Bands mirror the deal-score benchmarks.
+ */
+export function detectKpiAnomalies(metrics: ExtractedMetric[]): KpiAnomaly[] {
+  const ml = metricLookup(metrics);
+  const out: KpiAnomaly[] = [];
+
+  const payroll = ml.num("payroll_pct_revenue");
+  if (payroll !== undefined) {
+    if (payroll < 15)
+      out.push({
+        metricKey: "payroll_pct_revenue", label: "Payroll % of revenue", value: payroll, severity: "warn",
+        category: "finance_accounting",
+        message: `Payroll is only ${payroll}% of revenue — well below the ~25–40% typical for a clinical practice. The figure is likely partial (one period, or owner/contractor comp excluded).`,
+        suggestedQuestion: "Our records show total payroll at an unusually low share of revenue. Could you confirm the full annual payroll cost, including owner/physician compensation and any contracted (1099) clinical staff? A full-year payroll register or W-3 summary would help us reconcile.",
+      });
+    else if (payroll > 55)
+      out.push({
+        metricKey: "payroll_pct_revenue", label: "Payroll % of revenue", value: payroll, severity: "warn",
+        category: "finance_accounting",
+        message: `Payroll is ${payroll}% of revenue — above the typical range; verify whether owner compensation or one-time amounts are included.`,
+        suggestedQuestion: "Payroll appears high as a share of revenue. Could you break down total compensation by owner vs. staff, and flag any one-time bonuses or accruals included in the period?",
+      });
+  }
+
+  const daysAr = ml.num("days_in_ar");
+  if (daysAr !== undefined && daysAr > 60)
+    out.push({
+      metricKey: "days_in_ar", label: "Days in AR", value: daysAr, severity: "warn",
+      category: "revenue_cycle_billing",
+      message: `Days in AR is ${Math.round(daysAr)} — above the ~35-day healthy mark, suggesting slow collections or aged balances.`,
+      suggestedQuestion: "Days in AR looks elevated. Could you share a current AR aging by bucket (0–30 / 31–60 / 61–90 / 90+) and note any large or disputed balances?",
+    });
+
+  const denial = ml.num("denial_rate");
+  if (denial !== undefined && denial > 12)
+    out.push({
+      metricKey: "denial_rate", label: "Denial rate", value: denial, severity: "warn",
+      category: "revenue_cycle_billing",
+      message: `Denial rate is ${denial}% — above the ~5% healthy mark.`,
+      suggestedQuestion: "The denial rate looks high. Could you share the top denial reasons (CARC/RARC) and your current rework/appeals process?",
+    });
+
+  const margin = ml.num("ebitda_margin");
+  if (margin !== undefined) {
+    if (margin < 5)
+      out.push({
+        metricKey: "ebitda_margin", label: "EBITDA margin", value: margin, severity: "warn",
+        category: "finance_accounting",
+        message: `EBITDA margin is ${margin}% — thin. Confirm whether add-backs (owner comp normalization, one-time costs) have been applied.`,
+        suggestedQuestion: "We calculate a thin EBITDA margin. Could you provide an adjusted EBITDA bridge with add-backs (owner compensation normalization, one-time / non-recurring items)?",
+      });
+    else if (margin > 45)
+      out.push({
+        metricKey: "ebitda_margin", label: "EBITDA margin", value: margin, severity: "info",
+        category: "finance_accounting",
+        message: `EBITDA margin is ${margin}% — unusually high; verify the figure is operating EBITDA, not gross profit.`,
+        suggestedQuestion: "The EBITDA margin we calculated is unusually high. Could you confirm the EBITDA figure is after all operating expenses (not gross profit) and share the supporting P&L?",
+      });
+  }
+
+  return out;
+}
+
 export function metricLookup(metrics: ExtractedMetric[]): MetricLookup {
   // Prefer human-reviewed values over AI values for the same key.
   const byKey = new Map<string, ExtractedMetric>();

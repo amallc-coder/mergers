@@ -18,6 +18,7 @@ import type {
   Document,
   ExtractedMetric,
   Meeting,
+  Message,
   Organization,
   Person,
   PipelineStage,
@@ -36,6 +37,7 @@ export interface Snapshot {
   people?: Person[];
   contactLinks?: ContactLink[];
   communications?: Communication[];
+  messages?: Message[];
   alertRouting?: AlertRoute[];
   users: User[];
   transactions: Transaction[];

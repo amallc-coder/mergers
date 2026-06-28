@@ -85,6 +85,24 @@ export interface AlertRoute {
   category: string;
   roles: string[];
 }
+/** A message in the per-transaction seller↔buyer thread (internal note, an
+ *  outbound clarification to the seller, or a seller reply). */
+export interface Message {
+  id: string;
+  transactionId: string;
+  direction: "internal" | "to_seller" | "from_seller";
+  subject?: string | null;
+  body: string;
+  relatedMetricKey?: string | null;
+  relatedTaskId?: string | null;
+  authorId?: string | null;
+  authorName?: string | null;
+  authorType: "internal" | "seller" | "ai";
+  status: string; // draft | queued | sent | delivered | read
+  readAt?: string | null;
+  createdBy?: string | null;
+  createdAt: string;
+}
 /** Functional roles internal contacts can hold (drives role->category alerting). */
 export const FUNCTIONAL_ROLES = [
   "Finance",

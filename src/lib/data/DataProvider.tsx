@@ -26,6 +26,7 @@ import {
   type AlertRoute,
   type Communication,
   type ContactLink,
+  type Message,
   type Person,
   type PipelineStage,
 } from "../domain/types";
@@ -61,6 +62,8 @@ interface DataContextValue {
   people: Person[];
   contactLinks: ContactLink[];
   communications: Communication[];
+  /** Per-transaction seller↔buyer message threads. */
+  messages: Message[];
   alertRouting: AlertRoute[];
   /** True when a live backend is configured for this build. */
   liveConfigured: boolean;
@@ -90,6 +93,30 @@ interface DataContextValue {
   updateContact: (contactId: string, patch: Record<string, unknown>) => Promise<void>;
   linkContact: (contactId: string, transactionId: string, role?: string) => Promise<void>;
   unlinkContact: (contactId: string, transactionId: string) => Promise<void>;
+  /** Messaging (live only). All refresh the snapshot after. */
+  postMessage: (input: {
+    transactionId: string;
+    body: string;
+    direction?: "internal" | "to_seller" | "from_seller";
+    subject?: string;
+    authorName?: string;
+    relatedMetricKey?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+  }) => Promise<void>;
+  raiseClarification: (input: {
+    transactionId: string;
+    question: string;
+    title?: string;
+    metricKey?: string;
+    category?: string;
+    actorName?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+  }) => Promise<void>;
+  markMessagesRead: (transactionId: string) => Promise<void>;
 }
 
 const seedSnap = seedSnapshot();
@@ -104,6 +131,7 @@ const emptySnap: Snapshot = {
   people: [],
   contactLinks: [],
   communications: [],
+  messages: [],
   alertRouting: [],
   users: [],
   transactions: [],
@@ -134,6 +162,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [people, setPeople] = useState<Person[]>(seedSnap.people ?? []);
   const [contactLinks, setContactLinks] = useState<ContactLink[]>(seedSnap.contactLinks ?? []);
   const [communications, setCommunications] = useState<Communication[]>(seedSnap.communications ?? []);
+  const [messages, setMessages] = useState<Message[]>(seedSnap.messages ?? []);
   const [alertRouting, setAlertRouting] = useState<AlertRoute[]>(seedSnap.alertRouting ?? []);
   const [tick, setTick] = useState(0);
 
@@ -147,6 +176,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setPeople(seedSnap.people ?? []);
       setContactLinks(seedSnap.contactLinks ?? []);
       setCommunications(seedSnap.communications ?? []);
+      setMessages(seedSnap.messages ?? []);
       setAlertRouting(seedSnap.alertRouting ?? []);
       setStatus("idle");
       return;
@@ -159,6 +189,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     setPeople([]);
     setContactLinks([]);
     setCommunications([]);
+    setMessages([]);
     setAlertRouting([]);
     setStatus("loading");
     setError(null);
@@ -173,6 +204,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setPeople(snap.people ?? []);
         setContactLinks(snap.contactLinks ?? []);
         setCommunications(snap.communications ?? []);
+        setMessages(snap.messages ?? []);
         setAlertRouting(snap.alertRouting ?? []);
         setSource("live");
         setStatus("ok");
@@ -289,6 +321,30 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     },
     [requireLive, refresh],
   );
+  const postMessage = useCallback(
+    async (input: Parameters<DataContextValue["postMessage"]>[0]) => {
+      requireLive();
+      await dataApi.postMessage(input);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const raiseClarification = useCallback(
+    async (input: Parameters<DataContextValue["raiseClarification"]>[0]) => {
+      requireLive();
+      await dataApi.raiseClarification(input);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const markMessagesRead = useCallback(
+    async (transactionId: string) => {
+      if (source !== "live") return; // no-op in sample mode
+      await dataApi.markMessagesRead(transactionId);
+      refresh();
+    },
+    [source, refresh],
+  );
 
   // We're awaiting the first live snapshot whenever a live fetch is in flight; while
   // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
@@ -297,15 +353,17 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<DataContextValue>(
     () => ({
       repo, source, status, error, pipelineStages,
-      people, contactLinks, communications, alertRouting,
+      people, contactLinks, communications, messages, alertRouting,
       liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
+      postMessage, raiseClarification, markMessagesRead,
     }),
     [
       repo, source, status, error, pipelineStages,
-      people, contactLinks, communications, alertRouting,
+      people, contactLinks, communications, messages, alertRouting,
       liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
+      postMessage, raiseClarification, markMessagesRead,
     ],
   );
 
