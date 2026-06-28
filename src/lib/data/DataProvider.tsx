@@ -7,15 +7,19 @@
  *  - Live: when NEXT_PUBLIC_DATA_BACKEND=supabase and the access passcode is set,
  *    it fetches the whole dataset from the gated `data` Edge Function and serves
  *    every page from it (always fresh on load).
- *  - Seed: otherwise (passcode not entered, backend off, or fetch failed) it
- *    falls back to the in-memory seed snapshot so the app always renders.
+ *  - Seed: when the backend is off or the passcode isn't entered, it serves the
+ *    in-memory seed snapshot (sample data) so the app always renders.
+ *
+ * A live fetch that FAILS never falls back to seed — substituting sample
+ * financials for real ones would silently mislead. Instead it keeps the last
+ * loaded live data (if any) and exposes status="error" so the UI shows a retry.
  *
  * Pages call `useRepo()` to get a `DiligenceRepository` plus the source + status.
  * Because the site is a static export, this is how tabs read real data without a
  * server: the fetch happens client-side after hydration.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { DiligenceRepository } from "./repository";
 import { seedSnapshot } from "./seed-snapshot";
 import { snapshotRepository, type Snapshot } from "./snapshot";
@@ -26,6 +30,7 @@ import {
   type AlertRoute,
   type Communication,
   type ContactLink,
+  type Message,
   type Person,
   type PipelineStage,
 } from "../domain/types";
@@ -48,7 +53,10 @@ export interface CreateResult {
 }
 
 type Source = "seed" | "live";
-type Status = "idle" | "loading" | "ok" | "error";
+// "loading" = first live fetch (blank + spinner). "refreshing" = a background
+// refetch while real data stays on screen. "error" = a live fetch failed; we
+// never substitute seed data, so the UI shows an error/retry, not fake figures.
+type Status = "idle" | "loading" | "refreshing" | "ok" | "error";
 
 interface DataContextValue {
   repo: DiligenceRepository;
@@ -61,6 +69,8 @@ interface DataContextValue {
   people: Person[];
   contactLinks: ContactLink[];
   communications: Communication[];
+  /** Per-transaction seller↔buyer message threads. */
+  messages: Message[];
   alertRouting: AlertRoute[];
   /** True when a live backend is configured for this build. */
   liveConfigured: boolean;
@@ -90,6 +100,30 @@ interface DataContextValue {
   updateContact: (contactId: string, patch: Record<string, unknown>) => Promise<void>;
   linkContact: (contactId: string, transactionId: string, role?: string) => Promise<void>;
   unlinkContact: (contactId: string, transactionId: string) => Promise<void>;
+  /** Messaging (live only). All refresh the snapshot after. */
+  postMessage: (input: {
+    transactionId: string;
+    body: string;
+    direction?: "internal" | "to_seller" | "from_seller";
+    subject?: string;
+    authorName?: string;
+    relatedMetricKey?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+  }) => Promise<void>;
+  raiseClarification: (input: {
+    transactionId: string;
+    question: string;
+    title?: string;
+    metricKey?: string;
+    category?: string;
+    actorName?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+  }) => Promise<void>;
+  markMessagesRead: (transactionId: string) => Promise<void>;
 }
 
 const seedSnap = seedSnapshot();
@@ -104,6 +138,7 @@ const emptySnap: Snapshot = {
   people: [],
   contactLinks: [],
   communications: [],
+  messages: [],
   alertRouting: [],
   users: [],
   transactions: [],
@@ -128,12 +163,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [source, setSource] = useState<Source>("seed");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  // True once a live snapshot has loaded. Read inside the effect (via a ref so it
+  // isn't an effect dependency) to keep the last-known-good data on a failed refresh.
+  const loadedLiveRef = useRef(false);
   const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>(
     seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES,
   );
   const [people, setPeople] = useState<Person[]>(seedSnap.people ?? []);
   const [contactLinks, setContactLinks] = useState<ContactLink[]>(seedSnap.contactLinks ?? []);
   const [communications, setCommunications] = useState<Communication[]>(seedSnap.communications ?? []);
+  const [messages, setMessages] = useState<Message[]>(seedSnap.messages ?? []);
   const [alertRouting, setAlertRouting] = useState<AlertRoute[]>(seedSnap.alertRouting ?? []);
   const [tick, setTick] = useState(0);
 
@@ -147,20 +186,28 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setPeople(seedSnap.people ?? []);
       setContactLinks(seedSnap.contactLinks ?? []);
       setCommunications(seedSnap.communications ?? []);
+      setMessages(seedSnap.messages ?? []);
       setAlertRouting(seedSnap.alertRouting ?? []);
       setStatus("idle");
       return;
     }
     let cancelled = false;
-    // Clear any seed/demo data immediately so it never flashes under the live load.
-    // Views key off `awaitingLive` (status === "loading") to show a spinner instead.
-    setSource("seed");
-    setRepo(emptyRepo);
-    setPeople([]);
-    setContactLinks([]);
-    setCommunications([]);
-    setAlertRouting([]);
-    setStatus("loading");
+    if (loadedLiveRef.current) {
+      // We already have real data — refetch in the background, keeping it on
+      // screen (awaitingLive stays false, so no spinner wipes the view).
+      setStatus("refreshing");
+    } else {
+      // First load: clear any seed/demo data so it never flashes; views key off
+      // `awaitingLive` (status === "loading") to show a spinner until live arrives.
+      setSource("seed");
+      setRepo(emptyRepo);
+      setPeople([]);
+      setContactLinks([]);
+      setCommunications([]);
+      setMessages([]);
+      setAlertRouting([]);
+      setStatus("loading");
+    }
     setError(null);
     dataApi
       .snapshot()
@@ -173,15 +220,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setPeople(snap.people ?? []);
         setContactLinks(snap.contactLinks ?? []);
         setCommunications(snap.communications ?? []);
+        setMessages(snap.messages ?? []);
         setAlertRouting(snap.alertRouting ?? []);
         setSource("live");
         setStatus("ok");
+        loadedLiveRef.current = true;
       })
       .catch((e) => {
         if (cancelled) return;
-        // Fall back to seed so the app still renders; surface the error.
-        setRepo(seedRepo);
-        setSource("seed");
+        // NEVER fall back to seed: showing fabricated financials as if they were
+        // real is worse than an error. Keep the last-known-good live data if we
+        // have it; otherwise the empty dataset stays and views render their empty
+        // state. Either way `status="error"` drives a visible retry banner.
         setError(e instanceof Error ? e.message : String(e));
         setStatus("error");
       });
@@ -289,6 +339,34 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     },
     [requireLive, refresh],
   );
+  const postMessage = useCallback(
+    async (input: Parameters<DataContextValue["postMessage"]>[0]) => {
+      requireLive();
+      await dataApi.postMessage(input);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const raiseClarification = useCallback(
+    async (input: Parameters<DataContextValue["raiseClarification"]>[0]) => {
+      requireLive();
+      await dataApi.raiseClarification(input);
+      refresh();
+    },
+    [requireLive, refresh],
+  );
+  const markMessagesRead = useCallback(
+    async (transactionId: string) => {
+      if (source !== "live") return; // no-op in sample mode
+      await dataApi.markMessagesRead(transactionId);
+      refresh();
+    },
+    [source, refresh],
+  );
+
+  // We're awaiting the first live snapshot whenever a live fetch is in flight; while
+  // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
+  const awaitingLive = status === "loading";
 
   // We're awaiting the first live snapshot whenever a live fetch is in flight; while
   // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
@@ -297,15 +375,17 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<DataContextValue>(
     () => ({
       repo, source, status, error, pipelineStages,
-      people, contactLinks, communications, alertRouting,
+      people, contactLinks, communications, messages, alertRouting,
       liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
+      postMessage, raiseClarification, markMessagesRead,
     }),
     [
       repo, source, status, error, pipelineStages,
-      people, contactLinks, communications, alertRouting,
+      people, contactLinks, communications, messages, alertRouting,
       liveConfigured, awaitingLive, refresh, setStage, createTransaction, provisionDataRoom,
       addContact, updateContact, linkContact, unlinkContact,
+      postMessage, raiseClarification, markMessagesRead,
     ],
   );
 
@@ -316,6 +396,35 @@ export function useData(): DataContextValue {
   const ctx = useContext(DataContext);
   if (!ctx) throw new Error("useData must be used within DataProvider");
   return ctx;
+}
+
+/**
+ * Visible, blocking signal that a live fetch failed — so a backend hiccup never
+ * silently leaves stale/empty data on screen with no explanation. Renders nothing
+ * on the happy path. Mount it once in the app shell.
+ */
+export function LiveDataBanner() {
+  const { status, error, source, refresh } = useData();
+  if (status !== "error") return null;
+  return (
+    <div
+      role="alert"
+      className="flex items-center justify-between gap-3 border-b border-rust-200 bg-rust-50 px-4 py-2 text-sm text-rust-700 sm:px-6 lg:px-8"
+    >
+      <span className="min-w-0 truncate">
+        {source === "live"
+          ? "Showing the last loaded data — couldn’t reach the live backend."
+          : "Couldn’t load live data."}
+        {error ? <span className="text-rust-400"> ({error})</span> : null}
+      </span>
+      <button
+        onClick={refresh}
+        className="shrink-0 rounded-md bg-rust-600 px-2.5 py-1 text-xs font-medium text-paper hover:bg-rust-700"
+      >
+        Retry
+      </button>
+    </div>
+  );
 }
 
 /** Convenience: just the repository. */

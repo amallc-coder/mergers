@@ -96,4 +96,31 @@ export const dataApi = {
     templateKey?: string;
     actorName?: string;
   }) => call<{ status: string; error: string | null }>("sendMail", input),
+  postMessage: (input: {
+    transactionId: string;
+    body: string;
+    direction?: "internal" | "to_seller" | "from_seller";
+    subject?: string;
+    authorName?: string;
+    authorType?: string;
+    relatedMetricKey?: string;
+    relatedTaskId?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+  }) => call<{ status: string; error: string | null }>("postMessage", input),
+  raiseClarification: (input: {
+    transactionId: string;
+    question: string;
+    title?: string;
+    metricKey?: string;
+    category?: string;
+    actorName?: string;
+    toEmail?: string;
+    toName?: string;
+    contactId?: string;
+    dueDate?: string;
+  }) => call<{ taskId: string | null; status: string }>("raiseClarification", input),
+  markMessagesRead: (transactionId: string) =>
+    call<{ readAt: string }>("markMessagesRead", { transactionId }),
 };

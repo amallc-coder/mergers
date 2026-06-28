@@ -164,6 +164,14 @@ async function dbUpsert(table: string, rows: Record<string, unknown>[], onConfli
   if (!res.ok) throw new Error(`db upsert ${table} (${res.status}): ${await res.text()}`);
 }
 
+async function dbDelete(pathAndQuery: string) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathAndQuery}`, {
+    method: "DELETE",
+    headers: { apikey: SERVICE_ROLE, Authorization: `Bearer ${SERVICE_ROLE}`, Prefer: "return=minimal" },
+  });
+  if (!res.ok) throw new Error(`db delete ${pathAndQuery} (${res.status}): ${await res.text()}`);
+}
+
 // Data-room category folder → the app's category_key enum. AMA files are filed
 // under "other"; Intake (un-triaged uploads) is skipped.
 const FOLDER_TO_CATEGORY: Record<string, string> = {
@@ -1033,6 +1041,11 @@ const READING_META: Record<string, { category: string; name: string; unit: strin
   ebitda_val:       { category: "finance_accounting",      name: "EBITDA",               unit: "USD" },
   adj_ebitda_val:   { category: "finance_accounting",      name: "Adjusted EBITDA",      unit: "USD" },
   net_income_val:   { category: "finance_accounting",      name: "Net income",           unit: "USD" },
+  operating_income_val: { category: "finance_accounting",  name: "Operating income (EBIT)", unit: "USD" },
+  depreciation_val: { category: "finance_accounting",      name: "Depreciation",         unit: "USD" },
+  amortization_val: { category: "finance_accounting",      name: "Amortization",         unit: "USD" },
+  interest_val:     { category: "finance_accounting",      name: "Interest expense",     unit: "USD" },
+  tax_val:          { category: "finance_accounting",      name: "Income tax expense",   unit: "USD" },
   payroll_val:      { category: "finance_accounting",      name: "Payroll expense",      unit: "USD" },
   rent_val:         { category: "finance_accounting",      name: "Rent expense",         unit: "USD" },
   opex_val:         { category: "finance_accounting",      name: "Operating expenses",   unit: "USD" },
@@ -1107,6 +1120,7 @@ function extractPrompt(name: string, practiceName: string, readable: boolean, ex
     "- Percentages as a number out of 100 (7.5 means 7.5%). Days and counts as plain numbers.",
     '- If the document shows several years/periods, emit ONE row PER period, with that period in "period" (e.g. "FY2024", "2025", "T12 2026-03", "YTD 2026").',
     '- "docPeriod" is the primary period the document covers.',
+    '- On an income statement / P&L, also capture (when shown as line items) operating income (operating_income_val), depreciation (depreciation_val), amortization (amortization_val), interest expense (interest_val), and income tax (tax_val). These let us compute EBITDA when it is not stated. Still never invent a line that is not there.',
     '- Only emit a row when you are reading a real figure — never guess or infer. "confidence" is 0..1.',
     "- If the file is not a financial / billing / payroll document (e.g. a license, a photo, a contract), set isFinancial=false and return an empty metrics array.",
     '- "summary" is one sentence describing what the document shows.',
@@ -1281,6 +1295,37 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
     return arr.slice().sort((a, b) => periodRank(b.period) - periodRank(a.period) || b.conf - a.conf)[0];
   };
 
+  // Per-document index. Ratios (payroll %, EBITDA margin, collection rate) MUST be
+  // computed from figures in the SAME source statement — that guarantees the same
+  // legal entity AND the same period coverage, so a 3-month payroll is never divided
+  // by a 12-month revenue, and one entity's payroll never lands over another's revenue
+  // (e.g. a sleep-lab P&L's payroll over the main practice's revenue).
+  const byDoc = new Map<string, Map<string, RVal>>();
+  for (const r of rows) {
+    const srcId = String(r.source_document_id ?? "");
+    if (!srcId) continue;
+    const key = String(r.metric_key);
+    const value = Number(r.metric_value_numeric);
+    if (!isFinite(value)) continue;
+    if (!byDoc.has(srcId)) byDoc.set(srcId, new Map());
+    const m = byDoc.get(srcId)!;
+    const e: RVal = { value, period: String(r.period ?? ""), conf: Number(r.confidence_score ?? 0.5), srcId };
+    const ex = m.get(key);
+    if (!ex || periodRank(e.period) > periodRank(ex.period)) m.set(key, e); // latest per key within the doc
+  }
+  /** Best document (latest by `primaryKey`'s period) containing all of `keys`. */
+  const sameDocPair = (primaryKey: string, ...otherKeys: string[]): Map<string, RVal> | undefined => {
+    let best: Map<string, RVal> | undefined;
+    let bestRank = -Infinity;
+    for (const m of byDoc.values()) {
+      if (!m.has(primaryKey) || !otherKeys.every((k) => m.has(k))) continue;
+      const rank = periodRank(m.get(primaryKey)!.period);
+      if (rank > bestRank) { bestRank = rank; best = m; }
+    }
+    return best;
+  };
+  const revOf = (m: Map<string, RVal>) => m.get("rev_net") ?? m.get("rev_gross");
+
   const out: Record<string, unknown>[] = [];
   const add = (
     key: string, name: string, category: string, unit: string,
@@ -1327,12 +1372,59 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
 
   if (t12) add("t12_revenue", "Consolidated T12 revenue", "finance_accounting", "USD", t12.value, t12.period, t12.srcId, t12.conf, false, 0);
   if (revNet) add("net_revenue_fy", "Net revenue", "finance_accounting", "USD", revNet.value, revNet.period, revNet.srcId, revNet.conf, false, 0);
-  if (ebitda) add("ebitda", "EBITDA", "finance_accounting", "USD", ebitda.value, ebitda.period, ebitda.srcId, ebitda.conf, false);
+
+  // EBITDA: prefer a stated figure; otherwise DERIVE it from ONE income statement's
+  // components (same doc → entity- and period-consistent):
+  //   EBITDA = Operating income + Depreciation + Amortization
+  //          = Net income + Interest + Taxes + Depreciation + Amortization
+  // Require depreciation or amortization to be present, else it would just be EBIT/NI.
+  const ebitdaFromDoc = (m: Map<string, RVal>): { value: number; anchor: RVal } | undefined => {
+    if (!m.has("depreciation_val") && !m.has("amortization_val")) return undefined;
+    const da = (m.get("depreciation_val")?.value ?? 0) + (m.get("amortization_val")?.value ?? 0);
+    const oi = m.get("operating_income_val");
+    if (oi) return { value: oi.value + da, anchor: oi };
+    const ni = m.get("net_income_val");
+    if (ni) return { value: ni.value + (m.get("interest_val")?.value ?? 0) + (m.get("tax_val")?.value ?? 0) + da, anchor: ni };
+    return undefined;
+  };
+  let ebitdaShown = ebitda; // stated EBITDA (ebitda_val / adj_ebitda_val)
+  let ebitdaIsDerived = false;
+  if (!ebitdaShown) {
+    let best: { value: number; anchor: RVal } | undefined;
+    let bestRank = -Infinity;
+    for (const m of byDoc.values()) {
+      const d = ebitdaFromDoc(m);
+      if (!d) continue;
+      const rank = periodRank(d.anchor.period);
+      if (rank > bestRank) { bestRank = rank; best = d; }
+    }
+    if (best) {
+      ebitdaShown = { value: best.value, period: best.anchor.period, conf: best.anchor.conf * 0.9, srcId: best.anchor.srcId };
+      ebitdaIsDerived = true;
+    }
+  }
+
+  // EBITDA margin against the revenue from the SAME PERIOD as the EBITDA figure when
+  // available (period-consistent), else the headline revenue. A margin outside
+  // ~-40%..60% means a wrong line (gross profit / COGS) was grabbed, so suppress both.
+  const revRowsAll = [...(byKey.get("rev_net") ?? []), ...(byKey.get("rev_gross") ?? [])];
+  const ebRev = (ebitdaShown ? revRowsAll.find((r) => r.period === ebitdaShown!.period) : undefined) ?? revForRatio;
+  const impliedMargin = ebitdaShown && ebRev && ebRev.value > 0 ? (ebitdaShown.value / ebRev.value) * 100 : undefined;
+  const ebitdaPlausible = impliedMargin === undefined || (impliedMargin <= 60 && impliedMargin >= -40);
+  if (ebitdaShown && ebitdaPlausible)
+    add("ebitda", ebitdaIsDerived ? "EBITDA (derived)" : "EBITDA", "finance_accounting", "USD", ebitdaShown.value, ebitdaShown.period, ebitdaShown.srcId, ebitdaShown.conf, ebitdaIsDerived);
+  if (ebitdaShown && ebitdaPlausible && impliedMargin !== undefined)
+    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", impliedMargin, ebitdaShown.period, ebitdaShown.srcId, Math.min(ebitdaShown.conf, ebRev!.conf) * 0.95, true, -40, 60);
   if (adj) add("adjusted_ebitda", "Adjusted EBITDA", "finance_accounting", "USD", adj.value, adj.period, adj.srcId, adj.conf, false);
-  if (ebitda && revForRatio && revForRatio.value > 0)
-    add("ebitda_margin", "EBITDA margin", "finance_accounting", "percent", (ebitda.value / revForRatio.value) * 100, ebitda.period, ebitda.srcId, Math.min(ebitda.conf, revForRatio.conf) * 0.95, true, -100, 100);
-  if (payroll && revForRatio && revForRatio.value > 0)
-    add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (payroll.value / revForRatio.value) * 100, payroll.period, payroll.srcId, Math.min(payroll.conf, revForRatio.conf) * 0.95, true, 0, 200);
+
+  // Payroll % of revenue from a SAME-DOC pair, so a partial-period or different-entity
+  // payroll is never divided by the headline revenue.
+  const pDoc = sameDocPair("payroll_val", "rev_net") ?? sameDocPair("payroll_val", "rev_gross");
+  if (pDoc) {
+    const pay = pDoc.get("payroll_val")!;
+    const rev = revOf(pDoc)!;
+    add("payroll_pct_revenue", "Payroll as % of revenue", "finance_accounting", "percent", (pay.value / rev.value) * 100, pay.period, pay.srcId, Math.min(pay.conf, rev.conf) * 0.95, true, 0, 200);
+  }
 
   // YoY revenue growth from two fiscal years of net revenue.
   const revRows = (byKey.get("rev_net") ?? []).filter((r) => parseYear(r.period) > 0);
@@ -1350,12 +1442,26 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
       add("yoy_revenue_growth", "YoY revenue growth", "finance_accounting", "percent", ((cur.value / prev.value) - 1) * 100, `${years[1]}->${years[0]}`, cur.srcId, Math.min(cur.conf, prev.conf) * 0.95, true, -100, 500);
   }
 
-  if (ar) add("total_ar", "Total AR", "revenue_cycle_billing", "USD", ar.value, ar.period, ar.srcId, ar.conf, false, 0);
-  if (arDays) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", arDays.value, arDays.period, arDays.srcId, arDays.conf, false, 0, 400);
-  else if (ar && t12 && t12.value > 0) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", ar.value / (t12.value / 365), ar.period, ar.srcId, Math.min(ar.conf, t12.conf) * 0.9, true, 0, 400);
+  // Total AR is only shown when there's a revenue figure to sanity-check it against and
+  // it doesn't exceed ~1.6x annual revenue (a larger value almost always means COGS /
+  // cumulative charges / a prose figure was misread, e.g. pharmacy purchases).
+  const arOk = !!ar && !!revForRatio && revForRatio.value > 0 && ar!.value <= 1.6 * revForRatio.value;
+  if (arOk) add("total_ar", "Total AR", "revenue_cycle_billing", "USD", ar!.value, ar!.period, ar!.srcId, ar!.conf, false, 0);
+  // Days in AR: a stated value inside a sane band, else derived from plausible AR + T12.
+  if (arDays && arDays.value >= 3 && arDays.value <= 250)
+    add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", arDays.value, arDays.period, arDays.srcId, arDays.conf, false, 3, 250);
+  else if (arOk && t12 && t12.value > 0) {
+    const d = ar!.value / (t12.value / 365);
+    if (d >= 3 && d <= 250) add("days_in_ar", "Days in AR", "revenue_cycle_billing", "days", d, ar!.period, ar!.srcId, Math.min(ar!.conf, t12.conf) * 0.9, true, 3, 250);
+  }
   if (denial) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", denial.value, denial.period, denial.srcId, denial.conf, false, 0, 100);
   else if (denied && totalClaims && totalClaims.value > 0) add("denial_rate", "Denial rate", "revenue_cycle_billing", "percent", (denied.value / totalClaims.value) * 100, denied.period, denied.srcId, Math.min(denied.conf, totalClaims.conf) * 0.9, true, 0, 100);
-  if (charges && payments && charges.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (payments.value / charges.value) * 100, payments.period, payments.srcId, Math.min(charges.conf, payments.conf) * 0.95, true, 0, 200);
+  const cDoc = sameDocPair("payments_val", "charges_val");
+  if (cDoc) {
+    const pay = cDoc.get("payments_val")!;
+    const chg = cDoc.get("charges_val")!;
+    if (chg.value > 0) add("collection_rate", "Collection rate", "revenue_cycle_billing", "percent", (pay.value / chg.value) * 100, pay.period, pay.srcId, Math.min(pay.conf, chg.conf) * 0.95, true, 0, 200);
+  }
   if (visits) add("annual_visit_volume", "Annual visit volume", "revenue_cycle_billing", "count", visits.value, visits.period, visits.srcId, visits.conf, false, 0);
   if (patients) add("total_patients_emr", "Total patients in EMR", "revenue_cycle_billing", "count", patients.value, patients.period, patients.srcId, patients.conf, false, 0);
   if (employees) add("total_employees", "Total employees", "hr_payroll", "count", employees.value, employees.period, employees.srcId, employees.conf, false, 0);
@@ -1410,9 +1516,19 @@ async function extractMetrics(
     return { file: String(d.file_name), ...r };
   });
 
-  const readingRows = docResults.flatMap((r) =>
-    (r.rows ?? []).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() })),
-  );
+  // De-duplicate by the upsert key (metric_key + period). A single ON CONFLICT batch
+  // cannot contain two rows with the same conflict target (Postgres 21000) — otherwise
+  // the WHOLE slice fails and every reading in it is lost. When two docs report the same
+  // metric for the same period, keep the higher-confidence value.
+  const readingByKey = new Map<string, Record<string, unknown>>();
+  for (const r of docResults) {
+    for (const row of (r.rows ?? [])) {
+      const k = `${row.metric_key}|${row.period}`;
+      const ex = readingByKey.get(k);
+      if (!ex || Number(row.confidence_score ?? 0) > Number(ex.confidence_score ?? 0)) readingByKey.set(k, row);
+    }
+  }
+  const readingRows = [...readingByKey.values()].map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
   if (readingRows.length) await dbUpsert("ai_extracted_metrics", readingRows, "transaction_id,metric_key,period");
 
   // Re-consolidate from every reading row stored for this transaction (not just this slice).
@@ -1420,6 +1536,9 @@ async function extractMetrics(
     `ai_extracted_metrics?transaction_id=eq.${txId}&source=eq.ai&metric_key=in.(${READING_KEYS.join(",")})` +
       `&select=metric_key,metric_value_numeric,period,confidence_score,source_document_id`,
   );
+  // Replace this transaction's consolidated headline rows so metrics that are no longer
+  // emitted (e.g. an implausible value now suppressed) don't linger from a prior run.
+  await dbDelete(`ai_extracted_metrics?transaction_id=eq.${txId}&period=eq.Consolidated&source=eq.ai`);
   const displayRows = consolidate(allReading).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
   if (displayRows.length) await dbUpsert("ai_extracted_metrics", displayRows, "transaction_id,metric_key,period");
 
@@ -1438,8 +1557,31 @@ async function extractMetrics(
   };
 }
 
-// ── HTTP entry ──────────────────────────────────────────────────
+/**
+ * Re-run consolidation from the reading rows already stored — no document reads.
+ * Used after a consolidation-logic change so the live headline figures refresh
+ * without re-extracting (which would re-read every file).
+ */
+async function reconsolidateAll(): Promise<unknown> {
+  const txRows = await dbGet(`ai_extracted_metrics?source=eq.ai&period=neq.Consolidated&select=transaction_id`);
+  const txIds = [...new Set(txRows.map((r) => String(r.transaction_id)).filter(Boolean))];
+  let written = 0;
+  for (const txId of txIds) {
+    const allReading = await dbGet(
+      `ai_extracted_metrics?transaction_id=eq.${txId}&source=eq.ai&metric_key=in.(${READING_KEYS.join(",")})` +
+        `&select=metric_key,metric_value_numeric,period,confidence_score,source_document_id`,
+    );
+    await dbDelete(`ai_extracted_metrics?transaction_id=eq.${txId}&period=eq.Consolidated&source=eq.ai`);
+    const displayRows = consolidate(allReading).map((row) => ({ ...row, transaction_id: txId, last_updated: nowISO() }));
+    if (displayRows.length) {
+      await dbUpsert("ai_extracted_metrics", displayRows, "transaction_id,metric_key,period");
+      written += displayRows.length;
+    }
+  }
+  return { transactions: txIds.length, consolidatedRowsWritten: written };
+}
 
+// ── HTTP entry ──────────────────────────────────────────────────
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
 
@@ -1567,6 +1709,9 @@ Deno.serve(async (req) => {
         break;
       case "deltaSync":
         result = await deltaSync(token, driveId, args.deltaLink);
+        break;
+      case "reconsolidate":
+        result = await reconsolidateAll();
         break;
       default:
         return new Response(JSON.stringify({ error: `unknown action: ${action}` }), {

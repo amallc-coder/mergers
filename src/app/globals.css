@@ -17,8 +17,8 @@ body {
 
 body {
   font-family: var(--font-sans);
-  background-color: #f4f2ec;
-  color: #26241f;
+  background-color: #f4f0e8; /* bone */
+  color: #0f0e0c; /* graphite */
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -83,7 +83,20 @@ body {
 
   .input,
   .select {
-    @apply w-full rounded-lg border border-ink-200 bg-panel px-3 py-2 text-sm text-ink-800 outline-none transition-colors placeholder:text-ink-400 focus:border-brand-400;
+    @apply w-full rounded-lg border border-ink-200 bg-panel px-3 py-2 text-sm text-ink-800 outline-none transition-colors placeholder:text-ink-400 focus:border-ink-900;
+  }
+
+  /* Clay mono eyebrow that leads a metric group / section (design-system). */
+  .section-eyebrow {
+    @apply font-mono text-[10px] font-medium uppercase tracking-widest text-clay;
+  }
+  /* Clay micro tag ("AI" / "soon"). */
+  .tag {
+    @apply inline-flex items-center rounded-full bg-clay-50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-widest text-clay-600;
+  }
+  /* Clay numeric count badge on a tab. */
+  .count-badge {
+    @apply inline-flex items-center rounded-full bg-clay px-1.5 py-0.5 font-mono text-[10px] leading-none text-paper;
   }
 }
 
@@ -92,7 +105,7 @@ body {
   height: 8px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background-color: #ddd9cd;
+  background-color: #e4ded2; /* line */
   border-radius: 9999px;
 }
 .scrollbar-thin::-webkit-scrollbar-track {
