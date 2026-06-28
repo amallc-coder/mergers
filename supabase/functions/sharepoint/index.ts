@@ -345,13 +345,18 @@ function extFor(name: string) {
   return (name.split(".").pop() ?? "").toLowerCase();
 }
 
-function mediaKind(ext: string): { kind: "pdf" | "image" | "text" | "none"; mediaType: string } {
+// Office formats Microsoft Graph can render to PDF on the fly (?format=pdf), letting
+// us actually READ spreadsheets/word docs/decks instead of guessing from the name.
+const OFFICE_EXTS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf"]);
+
+function mediaKind(ext: string): { kind: "pdf" | "image" | "text" | "office" | "none"; mediaType: string } {
   if (ext === "pdf") return { kind: "pdf", mediaType: "application/pdf" };
   if (ext === "png") return { kind: "image", mediaType: "image/png" };
   if (ext === "jpg" || ext === "jpeg") return { kind: "image", mediaType: "image/jpeg" };
   if (ext === "gif") return { kind: "image", mediaType: "image/gif" };
   if (ext === "webp") return { kind: "image", mediaType: "image/webp" };
   if (ext === "txt" || ext === "csv") return { kind: "text", mediaType: "text/plain" };
+  if (OFFICE_EXTS.has(ext)) return { kind: "office", mediaType: "application/pdf" };
   return { kind: "none", mediaType: "" };
 }
 
@@ -365,12 +370,56 @@ function bytesToB64(bytes: Uint8Array): string {
 }
 
 async function downloadBytes(token: string, driveId: string, itemId: string, maxBytes: number): Promise<Uint8Array | null> {
-  const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) return null;
-  const buf = new Uint8Array(await res.arrayBuffer());
-  return buf.length > maxBytes ? null : buf;
+  // Method 1: pre-authenticated downloadUrl from the FULL item (no $select — $select
+  // strips the @microsoft.graph.downloadUrl annotation).
+  try {
+    const meta = await graph(token, `/drives/${driveId}/items/${itemId}`);
+    if (typeof meta?.size === "number" && meta.size > maxBytes) return null;
+    const url = meta?.["@microsoft.graph.downloadUrl"] as string | undefined;
+    if (url) {
+      const dl = await fetch(url);
+      if (dl.ok) {
+        const buf = new Uint8Array(await dl.arrayBuffer());
+        if (buf.length <= maxBytes) return buf;
+      }
+    }
+  } catch (_e) { /* fall through to method 2 */ }
+  // Method 2: /content but follow the 302 ourselves (the pre-signed Location needs no auth).
+  try {
+    const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content`, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "manual",
+    });
+    const loc = res.headers.get("location");
+    const dl = loc ? await fetch(loc) : res;
+    if (dl.ok) {
+      const buf = new Uint8Array(await dl.arrayBuffer());
+      if (buf.length <= maxBytes) return buf;
+    }
+  } catch (_e) { /* ignore */ }
+  return null;
+}
+
+/**
+ * Download an Office file rendered to PDF via Graph's on-the-fly conversion
+ * (?format=pdf). This lets the classifier read the actual contents of .xlsx/.docx/
+ * .pptx etc. The endpoint 302-redirects to a pre-signed URL we follow ourselves.
+ * Returns null if conversion fails or the rendered PDF exceeds maxBytes.
+ */
+async function downloadConverted(token: string, driveId: string, itemId: string, maxBytes: number): Promise<Uint8Array | null> {
+  try {
+    const res = await fetch(`${GRAPH}/drives/${driveId}/items/${itemId}/content?format=pdf`, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: "manual",
+    });
+    const loc = res.headers.get("location");
+    const dl = loc ? await fetch(loc) : res;
+    if (dl.ok) {
+      const buf = new Uint8Array(await dl.arrayBuffer());
+      if (buf.length <= maxBytes) return buf;
+    }
+  } catch (_e) { /* conversion unavailable for this file → caller falls back to name */ }
+  return null;
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
@@ -409,33 +458,22 @@ function classifyPrompt(name: string, parentName: string, readable: boolean, ext
   return lines.join("\n");
 }
 
-/** Classify a single file by its actual content via Claude. */
-async function classifyOne(token: string, driveId: string, item: { id: string; name: string; size: number; parentName: string }) {
-  const ext = extFor(item.name);
-  const media = mediaKind(ext);
-  const blocks: Record<string, unknown>[] = [];
-  let readable = false;
-  let textPreview = "";
+// Per-kind read caps. Edge functions are memory-constrained (~256MB) and base64
+// inflates bytes ~33%, so reading several large files concurrently can OOM. Keep the
+// caps modest: files above the cap fall back to name-based classification (large
+// billing/coding PDFs have descriptive names and classify correctly that way).
+const READ_CAP = { pdf: 10_000_000, image: 8_000_000, text: 8_000_000, office: 10_000_000, none: 0 } as const;
 
-  if (media.kind !== "none" && item.size <= 8_000_000) {
-    const bytes = await downloadBytes(token, driveId, item.id, 8_000_000);
-    if (bytes) {
-      if (media.kind === "pdf") {
-        blocks.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } });
-        readable = true;
-      } else if (media.kind === "image") {
-        blocks.push({ type: "image", source: { type: "base64", media_type: media.mediaType, data: bytesToB64(bytes) } });
-        readable = true;
-      } else if (media.kind === "text") {
-        textPreview = new TextDecoder().decode(bytes.slice(0, 20000));
-        readable = true;
-      }
-    }
-  }
+// Anthropic statuses worth retrying (rate limit / overloaded / transient gateway).
+const RETRYABLE = new Set([429, 500, 502, 503, 529]);
 
-  blocks.push({ type: "text", text: classifyPrompt(item.name, item.parentName, readable, ext, textPreview) });
-
-  try {
+/** One Claude classification call over the given content blocks, retrying transient errors. */
+async function callClaude(
+  blocks: Record<string, unknown>[],
+): Promise<{ ok: boolean; status: number; json?: Record<string, unknown>; text?: string }> {
+  let status = 0;
+  let text = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(ANTHROPIC_URL, {
       method: "POST",
       headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
@@ -446,26 +484,101 @@ async function classifyOne(token: string, driveId: string, item: { id: string; n
         messages: [{ role: "user", content: blocks }],
       }),
     });
-    if (!res.ok) {
-      const t = await res.text();
-      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${res.status}: ${t.slice(0, 300)}`, readable, error: `claude_${res.status}` };
+    if (res.ok) return { ok: true, status: res.status, json: await res.json() };
+    status = res.status;
+    text = await res.text();
+    if (!RETRYABLE.has(status)) break; // 400/413 etc. are not transient — bail to the caller's fallback
+    await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+  }
+  return { ok: false, status, text };
+}
+
+/** Parse a successful Claude response into the classification fields. */
+function parseClaude(json: Record<string, unknown>) {
+  if (json.stop_reason === "refusal") {
+    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(refusal)", reasoning: "model declined to classify", error: "refusal" as string | undefined };
+  }
+  const textBlock = ((json.content as Record<string, unknown>[]) ?? []).find((b) => b.type === "text");
+  const raw = String((textBlock as Record<string, unknown>)?.text ?? "");
+  const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+  return {
+    category: CATEGORY_FOLDERS.includes(parsed.category) ? parsed.category : REVIEW_FOLDER,
+    confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+    documentType: String(parsed.documentType ?? ""),
+    reasoning: String(parsed.reasoning ?? ""),
+    error: undefined as string | undefined,
+  };
+}
+
+/** Classify a single file by its actual content via Claude. */
+async function classifyOne(token: string, driveId: string, item: { id: string; name: string; size: number; parentName: string }) {
+  const ext = extFor(item.name);
+  const media = mediaKind(ext);
+  const cap = READ_CAP[media.kind];
+  let attachment: Record<string, unknown> | null = null;
+  let readable = false;
+  let textPreview = "";
+  let downloadFailed = false;
+  let oversized = false;
+
+  if (media.kind === "office") {
+    // Render the Office file to PDF via Graph, then read it like any PDF. Source size
+    // doesn't predict the rendered PDF size, so we just cap the converted output.
+    const bytes = await downloadConverted(token, driveId, item.id, cap);
+    if (bytes) {
+      attachment = { type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } };
+      readable = true;
+    } else {
+      downloadFailed = true; // conversion unavailable / too big → classify from name
     }
-    const json = await res.json();
-    if (json.stop_reason === "refusal") {
-      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(refusal)", reasoning: "model declined to classify", readable, error: "refusal" };
+  } else if (media.kind !== "none") {
+    if (item.size > cap) {
+      oversized = true; // too big to send; classify from name (see fallback below)
+    } else {
+      const bytes = await downloadBytes(token, driveId, item.id, cap);
+      if (bytes) {
+        if (media.kind === "pdf") {
+          attachment = { type: "document", source: { type: "base64", media_type: "application/pdf", data: bytesToB64(bytes) } };
+          readable = true;
+        } else if (media.kind === "image") {
+          attachment = { type: "image", source: { type: "base64", media_type: media.mediaType, data: bytesToB64(bytes) } };
+          readable = true;
+        } else if (media.kind === "text") {
+          textPreview = new TextDecoder().decode(bytes.slice(0, 20000));
+          readable = true;
+        }
+      } else {
+        downloadFailed = true;
+      }
     }
-    const textBlock = (json.content ?? []).find((b: Record<string, unknown>) => b.type === "text");
-    const raw = String(textBlock?.text ?? "");
-    const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
-    return {
-      category: CATEGORY_FOLDERS.includes(parsed.category) ? parsed.category : REVIEW_FOLDER,
-      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
-      documentType: String(parsed.documentType ?? ""),
-      reasoning: String(parsed.reasoning ?? ""),
-      readable,
-    };
+  }
+
+  async function run(withAttachment: boolean) {
+    const blocks: Record<string, unknown>[] = [];
+    if (withAttachment && attachment) blocks.push(attachment);
+    blocks.push({
+      type: "text",
+      text: classifyPrompt(item.name, item.parentName, withAttachment && readable, ext, withAttachment ? textPreview : ""),
+    });
+    return await callClaude(blocks);
+  }
+
+  try {
+    let resp = await run(true);
+    // If the attachment itself was rejected (PDF too large / too many pages → 400/413),
+    // fall back to a name-based pass so a clearly-named file isn't dumped into review.
+    if (!resp.ok && attachment && (resp.status === 400 || resp.status === 413)) {
+      oversized = true;
+      readable = false;
+      resp = await run(false);
+    }
+    if (!resp.ok) {
+      return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: `claude ${resp.status}: ${String(resp.text).slice(0, 300)}`, readable, downloadFailed, oversized, error: `claude_${resp.status}` };
+    }
+    const parsed = parseClaude(resp.json!);
+    return { ...parsed, readable, downloadFailed, oversized };
   } catch (e) {
-    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, error: "exception" };
+    return { category: REVIEW_FOLDER, confidence: 0, documentType: "(error)", reasoning: String(e).slice(0, 300), readable, downloadFailed, oversized, error: "exception" };
   }
 }
 
@@ -478,16 +591,20 @@ async function classifyDataRoom(
   token: string,
   driveId: string,
   practiceName: string,
-  opts: { dryRun?: boolean; offset?: number; limit?: number },
+  opts: { dryRun?: boolean; offset?: number; limit?: number; sourcePath?: string },
 ) {
   if (!ANTHROPIC_API_KEY) return { error: "ANTHROPIC_API_KEY is not set" };
   const dryRun = opts.dryRun ?? false;
   const offset = opts.offset ?? 0;
   const limit = opts.limit ?? 8;
 
+  // Read loose files from `sourcePath` (e.g. a staging dump) but file them into the
+  // real destination data room under ROOT_FOLDER. Defaults to in-place if no source.
   const dataRoomName = `Data Room - ${practiceName}`;
-  const root = await getByPath(token, driveId, dataRoomPath(dataRoomName));
-  if (!root) return { found: false, practiceName };
+  const destPath = dataRoomPath(dataRoomName);
+  const srcPath = opts.sourcePath ?? destPath;
+  const root = await getByPath(token, driveId, srcPath);
+  if (!root) return { found: false, practiceName, sourcePath: srcPath };
 
   const catSet = new Set(CATEGORY_FOLDERS.map((c) => c.toLowerCase()));
 
@@ -514,16 +631,16 @@ async function classifyDataRoom(
   const total = loose.length;
   const slice = loose.slice(offset, offset + limit);
 
-  // For real runs, make sure the destination category folders exist up front.
+  // For real runs, ensure the DESTINATION data room (under ROOT_FOLDER) + its 10
+  // category folders exist, then move classified files into them.
   const catId: Record<string, string> = {};
   if (!dryRun && slice.length > 0) {
-    for (const cat of CATEGORY_FOLDERS) {
-      const f = await ensureChildFolder(token, driveId, root.id, cat, `${dataRoomPath(dataRoomName)}/${cat}`);
-      catId[cat] = f.id;
-    }
+    const dr = await ensureDataRoom(token, driveId, practiceName);
+    for (const cat of CATEGORY_FOLDERS) catId[cat] = dr.folders[cat].id;
   }
 
-  const results = await mapLimit(slice, 4, async (f) => {
+  // Concurrency 2 keeps peak memory low (each in-flight file holds its bytes + base64).
+  const results = await mapLimit(slice, 2, async (f) => {
     const c = await classifyOne(token, driveId, f);
     const needsReview = c.category === REVIEW_FOLDER || (c.confidence ?? 0) < 0.6 || !!(c as Record<string, unknown>).error;
     const target = needsReview ? REVIEW_FOLDER : c.category;
@@ -541,6 +658,8 @@ async function classifyDataRoom(
       folder: f.parentName,
       sizeBytes: f.size,
       readable: c.readable,
+      downloadFailed: (c as Record<string, unknown>).downloadFailed,
+      oversized: (c as Record<string, unknown>).oversized,
       documentType: c.documentType,
       category: c.category,
       confidence: c.confidence,
@@ -552,7 +671,7 @@ async function classifyDataRoom(
     };
   });
 
-  return { found: true, practiceName, total, offset, limit, done: offset + limit >= total, dryRun, results };
+  return { found: true, practiceName, sourcePath: srcPath, destPath, total, offset, limit, done: offset + limit >= total, dryRun, results };
 }
 
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
@@ -697,6 +816,7 @@ Deno.serve(async (req) => {
           dryRun: args.dryRun ?? false,
           offset: args.offset ?? 0,
           limit: args.limit ?? 8,
+          sourcePath: args.sourcePath,
         });
         break;
       case "moveDocument":
