@@ -1,57 +1,198 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import Link from "next/link";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { Card, CardHeader, DealScoreBadge, PageHeader } from "@/components/ui";
-import { useRepoData } from "@/lib/data/DataProvider";
+import { useData, useRepoData } from "@/lib/data/DataProvider";
 import { getTransactionSummariesWith } from "@/lib/selectors";
 import { metricLookup } from "@/lib/domain/analytics";
+import { TERMINAL_STAGES } from "@/lib/domain/types";
 import { formatUSD, formatPercent } from "@/lib/format";
 import { SourceBadge, txHref, ViewLoading } from "./shared";
 
+type SortKey =
+  | "score"
+  | "t12_revenue"
+  | "ebitda"
+  | "ebitda_margin"
+  | "days_in_ar"
+  | "denial_rate"
+  | "practice";
+
+// label, and whether a higher value sorts "better" (so default desc puts best first).
+const SORTS: { key: SortKey; label: string; higherBetter: boolean }[] = [
+  { key: "score", label: "Deal score", higherBetter: true },
+  { key: "t12_revenue", label: "T12 revenue", higherBetter: true },
+  { key: "ebitda", label: "EBITDA", higherBetter: true },
+  { key: "ebitda_margin", label: "EBITDA margin", higherBetter: true },
+  { key: "days_in_ar", label: "Days in AR", higherBetter: false },
+  { key: "denial_rate", label: "Denial rate", higherBetter: false },
+  { key: "practice", label: "Practice name", higherBetter: false },
+];
+
 export function KpisView() {
+  const { pipelineStages, awaitingLive } = useData();
   const { data, loading, source } = useRepoData(async (repo) => {
     const summaries = await getTransactionSummariesWith(repo);
     const metricSets = await Promise.all(summaries.map((s) => repo.metrics(s.transaction.id)));
     return { summaries, metricSets };
   });
 
+  const [sortKey, setSortKey] = useState<SortKey>("score");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [fPractice, setFPractice] = useState("");
+  const [fRisk, setFRisk] = useState("");
+  const [onlyFinancials, setOnlyFinancials] = useState(false);
+  const [includeCompleted, setIncludeCompleted] = useState(false);
+
+  const terminalSet = useMemo(
+    () => new Set<string>([...pipelineStages.filter((s) => s.isTerminal).map((s) => s.label), ...TERMINAL_STAGES]),
+    [pipelineStages],
+  );
+
+  const cards = useMemo(() => {
+    if (!data) return [];
+    const built = data.summaries.map((s, idx) => {
+      const ml = metricLookup(data.metricSets[idx]);
+      return {
+        s,
+        ml,
+        hasFinancials: data.metricSets[idx].length > 0,
+        t12: ml.num("t12_revenue"),
+        ebitda: ml.num("ebitda"),
+        margin: ml.num("ebitda_margin"),
+        payrollPct: ml.num("payroll_pct_revenue"),
+        daysAr: ml.num("days_in_ar"),
+        denial: ml.num("denial_rate"),
+      };
+    });
+
+    let list = built;
+    if (!includeCompleted) list = list.filter((c) => !terminalSet.has(c.s.transaction.stage));
+    if (onlyFinancials) list = list.filter((c) => c.hasFinancials);
+    if (fPractice.trim()) {
+      const q = fPractice.trim().toLowerCase();
+      list = list.filter(
+        (c) =>
+          c.s.transaction.practiceName.toLowerCase().includes(q) ||
+          (c.s.transaction.specialty ?? "").toLowerCase().includes(q) ||
+          (c.s.transaction.state ?? "").toLowerCase().includes(q),
+      );
+    }
+    if (fRisk) list = list.filter((c) => c.s.transaction.riskLevel === fRisk);
+
+    const dir = sortDir === "asc" ? 1 : -1;
+    const metric = (c: (typeof built)[number]): number | string | undefined => {
+      switch (sortKey) {
+        case "score": return c.s.deal.numericScore;
+        case "t12_revenue": return c.t12;
+        case "ebitda": return c.ebitda;
+        case "ebitda_margin": return c.margin;
+        case "days_in_ar": return c.daysAr;
+        case "denial_rate": return c.denial;
+        case "practice": return c.s.transaction.practiceName.toLowerCase();
+      }
+    };
+    return [...list].sort((a, b) => {
+      const av = metric(a);
+      const bv = metric(b);
+      if (typeof av === "string" || typeof bv === "string") {
+        return String(av).localeCompare(String(bv)) * dir;
+      }
+      // Push missing values to the bottom regardless of direction.
+      if (av === undefined && bv === undefined) return 0;
+      if (av === undefined) return 1;
+      if (bv === undefined) return -1;
+      return (av - bv) * dir;
+    });
+  }, [data, sortKey, sortDir, fPractice, fRisk, onlyFinancials, includeCompleted, terminalSet]);
+
   return (
     <>
       <PageHeader title="KPI Dashboards" subtitle="Headline financial KPIs across the pipeline — every value is document-sourced" />
-      <div className="mb-3">
+      <div className="mb-3 flex items-center justify-between">
         <SourceBadge source={source} />
+        {data && <span className="text-xs text-ink-400">{cards.length} practice(s)</span>}
       </div>
-      {!data || loading ? (
+
+      {!data || loading || awaitingLive ? (
         <ViewLoading label="Loading KPIs…" />
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {data.summaries.map((s, idx) => {
-            const ml = metricLookup(data.metricSets[idx]);
-            const t12 = ml.num("t12_revenue");
-            const ebitda = ml.num("ebitda");
-            const margin = ml.num("ebitda_margin");
-            const payrollPct = ml.num("payroll_pct_revenue");
-            const daysAr = ml.num("days_in_ar");
-            const denial = ml.num("denial_rate");
-            return (
-              <Card key={s.transaction.id}>
-                <CardHeader
-                  title={<Link href={txHref(s.transaction.id)} className="hover:text-brand-700">{s.transaction.practiceName}</Link>}
-                  subtitle={`${s.transaction.specialty || "—"} · ${s.transaction.stage}`}
-                  action={<DealScoreBadge score={s.deal.score} />}
-                />
-                <div className="grid grid-cols-3 gap-px bg-ink-100">
-                  <Metric label="T12 revenue" value={t12 !== undefined ? formatUSD(t12, { compact: true }) : "—"} />
-                  <Metric label="EBITDA" value={ebitda !== undefined ? formatUSD(ebitda, { compact: true }) : "—"} />
-                  <Metric label="EBITDA margin" value={margin !== undefined ? formatPercent(margin) : "—"} />
-                  <Metric label="Payroll % rev" value={payrollPct !== undefined ? formatPercent(payrollPct) : "—"} />
-                  <Metric label="Days in AR" value={daysAr !== undefined ? `${Math.round(daysAr)}d` : "—"} />
-                  <Metric label="Denial rate" value={denial !== undefined ? formatPercent(denial) : "—"} />
-                </div>
-              </Card>
-            );
-          })}
-        </div>
+        <>
+          {/* Sort + filter controls */}
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1">
+              <span className="section-eyebrow mr-1">Sort</span>
+              <select
+                value={sortKey}
+                onChange={(e) => setSortKey(e.target.value as SortKey)}
+                className="h-8 rounded-lg border border-ink-200 bg-panel px-2 text-xs text-ink-700"
+              >
+                {SORTS.map((o) => (
+                  <option key={o.key} value={o.key}>{o.label}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+                className="inline-flex h-8 items-center gap-1 rounded-lg border border-ink-200 bg-panel px-2 text-xs text-ink-600 hover:border-ink-900 hover:text-ink-900"
+                title={sortDir === "asc" ? "Ascending" : "Descending"}
+              >
+                {sortDir === "asc" ? <ArrowUp size={13} /> : <ArrowDown size={13} />}
+                {sortDir === "asc" ? "Asc" : "Desc"}
+              </button>
+            </div>
+
+            <input
+              value={fPractice}
+              onChange={(e) => setFPractice(e.target.value)}
+              placeholder="Filter practice…"
+              className="h-8 w-52 rounded-lg border border-ink-200 bg-panel px-2.5 text-xs outline-none focus:border-ink-900"
+            />
+            <select
+              value={fRisk}
+              onChange={(e) => setFRisk(e.target.value)}
+              className="h-8 rounded-lg border border-ink-200 bg-panel px-2 text-xs text-ink-600"
+            >
+              <option value="">All risk</option>
+              {["Low", "Moderate", "Elevated", "High"].map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+            <label className="inline-flex items-center gap-1.5 text-xs text-ink-600">
+              <input type="checkbox" checked={onlyFinancials} onChange={(e) => setOnlyFinancials(e.target.checked)} />
+              Has financials
+            </label>
+            <label className="inline-flex items-center gap-1.5 text-xs text-ink-600">
+              <input type="checkbox" checked={includeCompleted} onChange={(e) => setIncludeCompleted(e.target.checked)} />
+              Include completed
+            </label>
+          </div>
+
+          {cards.length === 0 ? (
+            <Card><div className="px-5 py-8 text-center text-sm text-ink-400">No practices match these filters.</div></Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              {cards.map((c) => (
+                <Card key={c.s.transaction.id}>
+                  <CardHeader
+                    title={<Link href={txHref(c.s.transaction.id)} className="hover:text-brand-700">{c.s.transaction.practiceName}</Link>}
+                    subtitle={`${c.s.transaction.specialty || "—"} · ${c.s.transaction.stage}`}
+                    action={<DealScoreBadge score={c.s.deal.score} />}
+                  />
+                  <div className="grid grid-cols-3 gap-px bg-ink-100">
+                    <Metric label="T12 revenue" value={c.t12 !== undefined ? formatUSD(c.t12, { compact: true }) : "—"} />
+                    <Metric label="EBITDA" value={c.ebitda !== undefined ? formatUSD(c.ebitda, { compact: true }) : "—"} />
+                    <Metric label="EBITDA margin" value={c.margin !== undefined ? formatPercent(c.margin) : "—"} />
+                    <Metric label="Payroll % rev" value={c.payrollPct !== undefined ? formatPercent(c.payrollPct) : "—"} />
+                    <Metric label="Days in AR" value={c.daysAr !== undefined ? `${Math.round(c.daysAr)}d` : "—"} />
+                    <Metric label="Denial rate" value={c.denial !== undefined ? formatPercent(c.denial) : "—"} />
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </>
   );
