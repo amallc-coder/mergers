@@ -272,6 +272,40 @@ async function listTree(token: string, driveId: string, path: string) {
   return { found: true, root: { id: root.id, name: root.name, webUrl: root.webUrl }, count: entries.length, entries };
 }
 
+/**
+ * List the top-level "Data Room - <Practice>" folders. This drives the app's live
+ * deal pipeline so confidential practice names never have to be baked into the
+ * public frontend bundle — they're fetched at runtime by passcode-gated callers.
+ */
+async function listDataRooms(token: string, driveId: string) {
+  const rootItem = ROOT_FOLDER
+    ? await getByPath(token, driveId, ROOT_FOLDER)
+    : await graph(token, `/drives/${driveId}/root`);
+  if (!rootItem) return { dataRooms: [] };
+
+  const dataRooms: Record<string, unknown>[] = [];
+  let next: string | null =
+    `/drives/${driveId}/items/${rootItem.id}/children?$top=200&$select=id,name,webUrl,folder,lastModifiedDateTime`;
+  while (next) {
+    const page = await graph(token, next);
+    for (const c of page.value ?? []) {
+      if (!c.folder) continue;
+      if (!/^Data Room\s*-\s*/i.test(c.name)) continue;
+      dataRooms.push({
+        id: c.id,
+        name: c.name,
+        practiceName: c.name.replace(/^Data Room\s*-\s*/i, "").trim(),
+        webUrl: c.webUrl,
+        childCount: c.folder.childCount ?? 0,
+        lastModified: c.lastModifiedDateTime,
+      });
+    }
+    next = page["@odata.nextLink"] ?? null;
+  }
+  dataRooms.sort((a, b) => String(a.practiceName).localeCompare(String(b.practiceName)));
+  return { rootFolder: ROOT_FOLDER || "(library root)", count: dataRooms.length, dataRooms };
+}
+
 /** Incremental change feed for the whole library. Pass the prior deltaToken to get only changes. */
 async function deltaSync(token: string, driveId: string, deltaLink?: string) {
   const start = deltaLink ?? `/drives/${driveId}/root/delta`;
