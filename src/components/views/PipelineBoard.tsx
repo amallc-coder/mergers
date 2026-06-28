@@ -25,7 +25,7 @@ function daysInStage(enteredAt?: string): string {
 }
 
 export function PipelineBoard() {
-  const { repo, pipelineStages, source, setStage } = useData();
+  const { repo, pipelineStages, source, awaitingLive, setStage } = useData();
   const [deals, setDeals] = useState<Transaction[] | null>(null);
   const [moving, setMoving] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -62,7 +62,7 @@ export function PipelineBoard() {
     }
   }
 
-  if (!deals) {
+  if (!deals || awaitingLive) {
     return (
       <div className="flex items-center gap-2 py-10 text-ink-400">
         <Loader2 size={16} className="animate-spin" /> Loading pipeline…

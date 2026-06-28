@@ -37,10 +37,18 @@ export function generateExecutiveSummary(
     return v === undefined ? null : formatUSD(v, { compact: true });
   };
 
+  const specialtyPhrase = transaction.specialty ? `${transaction.specialty.toLowerCase()} practice` : "practice";
+  const locationPhrase =
+    transaction.locationsCount > 0
+      ? `${transaction.locationsCount} location${transaction.locationsCount === 1 ? "" : "s"}`
+      : "an undisclosed number of locations";
+  const statePhrase = transaction.state ? ` in ${transaction.state}` : "";
+  const providerPhrase =
+    transaction.providersCount > 0
+      ? ` with ${transaction.providersCount} provider${transaction.providersCount === 1 ? "" : "s"}`
+      : "";
   const practiceOverview =
-    `${transaction.practiceName} is a ${transaction.specialty.toLowerCase()} practice operating ` +
-    `${transaction.locationsCount} location${transaction.locationsCount === 1 ? "" : "s"} in ${transaction.state} ` +
-    `with ${transaction.providersCount} provider${transaction.providersCount === 1 ? "" : "s"}. ` +
+    `${transaction.practiceName} is a ${specialtyPhrase} operating ${locationPhrase}${statePhrase}${providerPhrase}. ` +
     `The transaction is currently in the "${transaction.stage}" stage.`;
 
   const sections: { heading: string; body: string }[] = [];

@@ -18,7 +18,7 @@ const FORMATS: { key: ReportFormat; label: string; Icon: typeof FileText }[] = [
 ];
 
 export function ReportsView() {
-  const { repo, source } = useData();
+  const { repo, source, awaitingLive } = useData();
   const [txs, setTxs] = useState<{ id: string; practiceName: string }[] | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [view, setView] = useState<TransactionView | null>(null);
@@ -95,7 +95,7 @@ export function ReportsView() {
 
       {err && <p className="mb-3 text-xs text-amber-600">Export failed: {err}</p>}
 
-      {!txs ? (
+      {!txs || awaitingLive ? (
         <ViewLoading label="Loading deals…" />
       ) : (
         <Card>
