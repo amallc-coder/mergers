@@ -1266,11 +1266,19 @@ function parseYear(p: string): number {
   const m = (p || "").match(/20\d{2}/);
   return m ? parseInt(m[0], 10) : 0;
 }
+function isPartialPeriod(p: string): boolean {
+  // Year-to-date or a balance-sheet "as of"/"through" snapshot — an INCOMPLETE period.
+  return /ytd|to.?date|as of|through/i.test(p || "");
+}
 function periodRank(p: string): number {
   const s = (p || "").toLowerCase();
   let rank = parseYear(s) * 100;
-  if (/t-?12|trailing|ttm/.test(s)) rank += 50;
-  if (/ytd|to.?date/.test(s)) rank += 20;
+  // Completeness tier: a trailing-twelve (T12/TTM) is the best headline; a full fiscal
+  // year is next; a partial year-to-date (or balance-sheet snapshot) is INCOMPLETE and
+  // must rank below a full PRIOR year, so e.g. FY2025 beats "YTD 2026" (a half-year).
+  if (/t-?12|trailing|ttm/.test(s)) rank += 60;
+  else if (isPartialPeriod(s)) rank -= 100;
+  else rank += 30;
   const mm = s.match(/20\d{2}[-/ ](\d{1,2})/);
   if (mm) rank += Math.min(12, parseInt(mm[1], 10));
   return rank;
@@ -1280,6 +1288,25 @@ interface RVal { value: number; period: string; conf: number; srcId: string | nu
 
 /** Derive the single headline value for each display KPI from the granular reading rows. */
 function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  // Drop forecast/projection figures so they can never become the headline ACTUAL.
+  // A source document that reports any FUTURE-dated period (beyond the current year) is
+  // a projection model — e.g. a valuation memo projecting 2027-2031 — so every figure in
+  // it (including its current-year column) is a forecast, not an actual. Exclude the
+  // whole document, plus any stray future-dated reading.
+  const currentYear = new Date().getFullYear();
+  const projectionDocs = new Set<string>();
+  for (const r of rows) {
+    if (parseYear(String(r.period ?? "")) > currentYear) {
+      const sid = String(r.source_document_id ?? "");
+      if (sid) projectionDocs.add(sid);
+    }
+  }
+  rows = rows.filter((r) => {
+    if (parseYear(String(r.period ?? "")) > currentYear) return false;
+    const sid = String(r.source_document_id ?? "");
+    return !(sid && projectionDocs.has(sid));
+  });
+
   const byKey = new Map<string, RVal[]>();
   for (const r of rows) {
     const key = String(r.metric_key);
@@ -1379,12 +1406,19 @@ function consolidate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   //          = Net income + Interest + Taxes + Depreciation + Amortization
   // Require depreciation or amortization to be present, else it would just be EBIT/NI.
   const ebitdaFromDoc = (m: Map<string, RVal>): { value: number; anchor: RVal } | undefined => {
-    if (!m.has("depreciation_val") && !m.has("amortization_val")) return undefined;
-    const da = (m.get("depreciation_val")?.value ?? 0) + (m.get("amortization_val")?.value ?? 0);
+    // Use only depreciation/amortization that is a PERIOD EXPENSE. D&A pulled from a
+    // balance-sheet "as of" snapshot is ACCUMULATED depreciation (a stock), not the
+    // period's expense, and would massively overstate EBITDA — so skip it.
+    const dep = m.get("depreciation_val");
+    const amo = m.get("amortization_val");
+    const depOk = dep && !isPartialPeriod(dep.period);
+    const amoOk = amo && !isPartialPeriod(amo.period);
+    if (!depOk && !amoOk) return undefined;
+    const da = (depOk ? dep!.value : 0) + (amoOk ? amo!.value : 0);
     const oi = m.get("operating_income_val");
-    if (oi) return { value: oi.value + da, anchor: oi };
+    if (oi && !isPartialPeriod(oi.period)) return { value: oi.value + da, anchor: oi };
     const ni = m.get("net_income_val");
-    if (ni) return { value: ni.value + (m.get("interest_val")?.value ?? 0) + (m.get("tax_val")?.value ?? 0) + da, anchor: ni };
+    if (ni && !isPartialPeriod(ni.period)) return { value: ni.value + (m.get("interest_val")?.value ?? 0) + (m.get("tax_val")?.value ?? 0) + da, anchor: ni };
     return undefined;
   };
   let ebitdaShown = ebitda; // stated EBITDA (ebitda_val / adj_ebitda_val)
