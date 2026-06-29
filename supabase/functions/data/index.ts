@@ -168,7 +168,12 @@ async function graphToken(): Promise<string> {
 }
 
 /** Delegated (ROPC) token — sign in AS the sender mailbox using its login, so we can
- *  send on its behalf with only a delegated Mail.Send grant (no application permission). */
+ *  send on its behalf with only a delegated Mail.Send grant (no application permission).
+ *  NOTE: ROPC must request the ".default" scope, not the granular "Mail.Send" scope.
+ *  A granular resource scope routes the request through Azure AD's *dynamic* consent
+ *  path, which ROPC cannot satisfy interactively → AADSTS65001 even when admin consent
+ *  is already granted. ".default" uses the statically admin-consented permission set,
+ *  which includes Mail.Send once consent is in place. */
 async function delegatedToken(): Promise<string> {
   const body = new URLSearchParams({
     client_id: AZURE_CLIENT_ID,
@@ -176,7 +181,7 @@ async function delegatedToken(): Promise<string> {
     grant_type: "password",
     username: SENDER_USER,
     password: SENDER_PASSWORD,
-    scope: "https://graph.microsoft.com/Mail.Send",
+    scope: "https://graph.microsoft.com/.default",
   });
   const res = await fetch(`https://login.microsoftonline.com/${AZURE_TENANT}/oauth2/v2.0/token`, {
     method: "POST",
@@ -200,6 +205,10 @@ async function deliverEmail(
   toName: string | undefined,
   subject: string,
   body: string,
+  // Optional alternate "From" mailbox. Only honored when the authenticated sender
+  // has Exchange "Send As" rights on that mailbox; otherwise Graph returns
+  // ErrorSendAsDenied (403) and we report it rather than silently sending as the login.
+  fromEmail?: string,
 ): Promise<{ status: "sent" | "queued" | "failed"; error: string | null }> {
   // Prefer the delegated login (sign in AS the mailbox) when credentials are set;
   // otherwise fall back to app-only send from the configured sender mailbox.
@@ -211,26 +220,26 @@ async function deliverEmail(
     const endpoint = useDelegated
       ? `https://graph.microsoft.com/v1.0/me/sendMail`
       : `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SENDER_MAILBOX)}/sendMail`;
+    const message: Record<string, unknown> = {
+      subject,
+      body: { contentType: "HTML", content: body },
+      toRecipients: [{ emailAddress: { address: toEmail, name: toName } }],
+    };
+    if (fromEmail) message.from = { emailAddress: { address: fromEmail } };
     const res = await fetch(
       endpoint,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: {
-            subject,
-            body: { contentType: "HTML", content: body },
-            toRecipients: [{ emailAddress: { address: toEmail, name: toName } }],
-          },
-          saveToSentItems: true,
-        }),
+        body: JSON.stringify({ message, saveToSentItems: true }),
       },
     );
     if (res.ok || res.status === 202) return { status: "sent", error: null };
     const errText = await res.text();
-    // 401/403 → Mail.Send not granted yet: keep it queued for a later flush.
+    // 401/403 → Mail.Send not granted yet (or Send-As denied for the From mailbox):
+    // keep it queued for a later flush and surface the Graph error verbatim.
     if (res.status === 401 || res.status === 403) {
-      return { status: "queued", error: `Mail.Send not granted yet (${res.status}).` };
+      return { status: "queued", error: `send blocked (${res.status}): ${errText.slice(0, 240)}` };
     }
     return { status: "failed", error: `sendMail ${res.status}: ${errText.slice(0, 300)}` };
   } catch (e) {
@@ -506,7 +515,8 @@ Deno.serve(async (req) => {
         const body = String(args.body ?? "");
         if (!toEmail || !subject) return json({ ok: false, error: "toEmail and subject required" }, 400);
         const toName = typeof args.toName === "string" ? args.toName : undefined;
-        const { status, error } = await deliverEmail(null, toEmail, toName, subject, body);
+        const fromEmail = typeof args.fromEmail === "string" && args.fromEmail ? args.fromEmail : undefined;
+        const { status, error } = await deliverEmail(null, toEmail, toName, subject, body, fromEmail);
         const row = {
           transaction_id: args.transactionId ?? null,
           contact_id: args.contactId ?? null,
