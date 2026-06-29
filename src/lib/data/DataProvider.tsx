@@ -368,6 +368,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
   const awaitingLive = status === "loading";
 
+  // We're awaiting the first live snapshot whenever a live fetch is in flight; while
+  // true the repo is the empty dataset, so views show a spinner, not seed/empty data.
+  const awaitingLive = status === "loading";
+
   const value = useMemo<DataContextValue>(
     () => ({
       repo, source, status, error, pipelineStages,
