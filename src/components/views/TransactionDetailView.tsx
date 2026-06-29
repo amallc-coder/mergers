@@ -27,6 +27,7 @@ import { NOW } from "@/lib/data/seed";
 import { ViewLoading } from "./shared";
 
 export function TransactionDetailView({ id }: { id: string }) {
+  const { source, postMessage } = useData();
   const { data, loading } = useRepoData(async (repo) => {
     const view = await getTransactionViewWith(repo, id);
     if (!view) return null;
@@ -52,6 +53,28 @@ export function TransactionDetailView({ id }: { id: string }) {
   const contactNames: Record<string, string> = Object.fromEntries(view.contacts.map((c) => [c.id, c.name]));
   const sellerLink = sellerPortalUsers.find((s) => s.transactionId === view.transaction.id);
 
+  // The external (seller-side) contact reminders are addressed to. Live only.
+  const sellerContact =
+    view.contacts.find((c) => c.type === "external" && c.email && c.primary) ??
+    view.contacts.find((c) => c.type === "external" && c.email);
+  const onRemind =
+    source === "live" && sellerContact?.email
+      ? async (item: (typeof view.requestItems)[number]) => {
+          await postMessage({
+            transactionId: view.transaction.id,
+            direction: "to_seller",
+            toEmail: sellerContact.email,
+            toName: sellerContact.name,
+            contactId: sellerContact.id,
+            subject: `Reminder: ${item.name}`,
+            body:
+              `This is a friendly reminder that "${item.name}" for ${view.transaction.practiceName} ` +
+              `is still outstanding${item.dueDate ? ` (it was due ${new Date(item.dueDate).toLocaleDateString()})` : ""}. ` +
+              `Please upload it at your earliest convenience — reply here if you have any questions.`,
+          });
+        }
+      : undefined;
+
   const riskNarrative =
     view.riskFlags.map((r) => `${r.title}: ${r.detail}`).join(" ") + " " + view.missing.narrative;
 
@@ -72,6 +95,7 @@ export function TransactionDetailView({ id }: { id: string }) {
           nowIso={nowIso}
           reviewerNames={userNames}
           contactNames={contactNames}
+          onRemind={onRemind}
         />
       ),
     },
