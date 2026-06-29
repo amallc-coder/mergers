@@ -123,4 +123,6 @@ export const dataApi = {
   }) => call<{ taskId: string | null; status: string }>("raiseClarification", input),
   markMessagesRead: (transactionId: string) =>
     call<{ readAt: string }>("markMessagesRead", { transactionId }),
+  mintSellerLink: (input: { transactionId: string; email: string; name?: string; contactId?: string }) =>
+    call<{ token: string; url: string }>("mintSellerLink", input),
 };

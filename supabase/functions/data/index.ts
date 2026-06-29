@@ -247,6 +247,94 @@ async function deliverEmail(
   }
 }
 
+// Public base URL of the deployed seller portal (origin + basePath), e.g.
+// "https://amallc-coder.github.io/mergers". When set, outbound clarification
+// emails include a one-click reply link; when empty, the link is omitted.
+const PORTAL_BASE_URL = Deno.env.get("PORTAL_BASE_URL") ?? "";
+
+type Seller = {
+  id: string;
+  transaction_id: string;
+  contact_id: string | null;
+  name: string;
+  email: string;
+};
+
+/** Resolve a seller portal token to its (active, unexpired) record, bumping
+ *  last_access_at. Returns null for unknown/inactive/expired tokens. This is the
+ *  ONLY gate for the seller-facing actions — they never accept the team appKey. */
+async function resolveSeller(token: string): Promise<Seller | null> {
+  if (!token || token.length < 16) return null;
+  const rows = await dbSelect(
+    `seller_portal_users?access_token=eq.${encodeURIComponent(token)}&active=is.true` +
+      `&select=id,transaction_id,contact_id,name,email,expires_at&limit=1`,
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.expires_at && new Date(String(row.expires_at)).getTime() < Date.now()) return null;
+  // Best-effort access stamp; never block the read on it.
+  patch("seller_portal_users", { id: String(row.id) }, { last_access_at: new Date().toISOString() }).catch(
+    () => {},
+  );
+  return {
+    id: String(row.id),
+    transaction_id: String(row.transaction_id),
+    contact_id: row.contact_id ? String(row.contact_id) : null,
+    name: String(row.name ?? "Seller"),
+    email: String(row.email ?? ""),
+  };
+}
+
+/** Find or create an active seller portal token for one (transaction, contact).
+ *  Idempotent: reuses an existing active, unexpired token so repeated emails to
+ *  the same seller share one link. Returns the token string. */
+async function ensureSellerToken(
+  transactionId: string,
+  contactId: string | null,
+  name: string,
+  email: string,
+): Promise<string> {
+  const filter = contactId
+    ? `contact_id=eq.${encodeURIComponent(contactId)}`
+    : `email=eq.${encodeURIComponent(email)}`;
+  const existing = await dbSelect(
+    `seller_portal_users?transaction_id=eq.${encodeURIComponent(transactionId)}&${filter}` +
+      `&active=is.true&select=access_token,expires_at&limit=1`,
+  );
+  const cur = existing[0];
+  if (cur && (!cur.expires_at || new Date(String(cur.expires_at)).getTime() > Date.now())) {
+    return String(cur.access_token);
+  }
+  const token = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "");
+  const expires = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(); // 90 days
+  await insertRow("seller_portal_users", {
+    transaction_id: transactionId,
+    contact_id: contactId,
+    name: name || "Seller",
+    email: email || "",
+    access_token: token,
+    active: true,
+    expires_at: expires,
+  });
+  return token;
+}
+
+/** The seller-facing reply URL for a token, or "" when no portal base is set. */
+function sellerReplyLink(token: string): string {
+  if (!PORTAL_BASE_URL || !token) return "";
+  return `${PORTAL_BASE_URL.replace(/\/$/, "")}/portal/reply/?t=${encodeURIComponent(token)}`;
+}
+
+/** Append a "reply to this securely" footer to an outbound seller email body. */
+function withReplyFooter(html: string, link: string): string {
+  if (!link) return html;
+  return (
+    `${html}<hr style="margin:18px 0;border:none;border-top:1px solid #e5e7eb"/>` +
+    `<p style="font-size:13px;color:#6b7280">You can reply securely in your seller portal: ` +
+    `<a href="${link}">${link}</a></p>`
+  );
+}
+
 /** Mark all unread messages on a transaction as read (newest-first inbox view). */
 async function markRead(transactionId: string): Promise<string> {
   const now = new Date().toISOString();
@@ -278,13 +366,74 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "invalid JSON body" }, 400);
   }
 
+  const action = typeof args.action === "string" ? args.action : "";
+
+  // --- Seller-facing actions: gated by an opaque per-deal token, NOT the team
+  // passcode. Strictly isolated to one transaction's seller↔buyer thread; no
+  // internal notes, KPIs, valuation, or other deals are ever reachable here. ---
+  if (action === "sellerContext" || action === "sellerReply") {
+    try {
+      const seller = await resolveSeller(String(args.sellerToken ?? ""));
+      if (!seller) return json({ ok: false, error: "This link is invalid or has expired." }, 401);
+      const txRows = await dbSelect(
+        `transactions?id=eq.${encodeURIComponent(seller.transaction_id)}&select=practice_name,name&limit=1`,
+      );
+      const practiceName = String(txRows[0]?.practice_name ?? txRows[0]?.name ?? "Your practice");
+
+      if (action === "sellerReply") {
+        const body = String(args.body ?? "").trim();
+        if (!body) return json({ ok: false, error: "Message body required" }, 400);
+        const now = new Date().toISOString();
+        const inserted = await upsert("messages", {
+          transaction_id: seller.transaction_id,
+          direction: "from_seller",
+          subject: typeof args.subject === "string" ? args.subject : null,
+          body,
+          related_metric_key: null,
+          related_task_id: typeof args.relatedTaskId === "string" ? args.relatedTaskId : null,
+          author_name: seller.name,
+          author_type: "seller",
+          status: "sent",
+          read_at: null, // unread for the deal team
+          created_by: seller.name,
+          created_at: now,
+        });
+        await insertRow("activity_events", {
+          transaction_id: seller.transaction_id,
+          type: "message",
+          actor_name: seller.name,
+          summary: "Seller replied via portal",
+          detail: body.slice(0, 280),
+        });
+        return json({ ok: true, result: { message: inserted } });
+      }
+
+      // sellerContext — return the seller-safe thread (their side of the convo only).
+      const rows = await dbSelect(
+        `messages?transaction_id=eq.${encodeURIComponent(seller.transaction_id)}` +
+          `&direction=in.(to_seller,from_seller)` +
+          `&select=id,direction,subject,body,author_name,created_at&order=created_at.asc`,
+      );
+      const thread = rows.map((m) => ({
+        id: String(m.id),
+        direction: String(m.direction),
+        subject: (m.subject as string) ?? null,
+        body: String(m.body ?? ""),
+        authorName: (m.author_name as string) ?? null,
+        createdAt: String(m.created_at),
+      }));
+      return json({ ok: true, result: { practiceName, sellerName: seller.name, thread } });
+    } catch (err) {
+      return json({ ok: false, error: String(err) }, 500);
+    }
+  }
+
   // Access gate — same shared passcode as the sharepoint function.
   const provided = typeof args.appKey === "string" ? args.appKey : "";
   if (!provided || (await sha256Hex(provided)) !== APP_KEY_SHA256) {
     return json({ ok: false, error: "Locked: invalid or missing access passcode." }, 401);
   }
 
-  const action = typeof args.action === "string" ? args.action : "";
   try {
     switch (action) {
       case "snapshot": {
@@ -434,7 +583,16 @@ Deno.serve(async (req) => {
         let status = direction === "to_seller" ? "queued" : "sent";
         let emailError: string | null = null;
         if (direction === "to_seller" && args.toEmail) {
-          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, subject ?? "Message from the deal team", body);
+          // Give the seller a one-click secure reply link back into this thread.
+          let emailBody = body;
+          if (PORTAL_BASE_URL) {
+            const token = await ensureSellerToken(
+              transactionId, typeof args.contactId === "string" ? args.contactId : null,
+              typeof args.toName === "string" ? args.toName : "Seller", String(args.toEmail),
+            ).catch(() => "");
+            emailBody = withReplyFooter(body, sellerReplyLink(token));
+          }
+          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, subject ?? "Message from the deal team", emailBody);
           status = r.status === "sent" ? "sent" : "queued";
           emailError = r.error;
           await insertRow("communications", {
@@ -476,7 +634,16 @@ Deno.serve(async (req) => {
         const taskId = Array.isArray(taskRows) && taskRows[0] ? String(taskRows[0].id) : null;
         let status = "queued";
         if (args.toEmail) {
-          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, title, question);
+          // Include a secure reply link so the seller can answer the clarification.
+          let emailBody = question;
+          if (PORTAL_BASE_URL) {
+            const token = await ensureSellerToken(
+              transactionId, typeof args.contactId === "string" ? args.contactId : null,
+              typeof args.toName === "string" ? args.toName : "Seller", String(args.toEmail),
+            ).catch(() => "");
+            emailBody = withReplyFooter(question, sellerReplyLink(token));
+          }
+          const r = await deliverEmail(null, String(args.toEmail), typeof args.toName === "string" ? args.toName : undefined, title, emailBody);
           status = r.status === "sent" ? "sent" : "queued";
           await insertRow("communications", {
             transaction_id: transactionId, contact_id: args.contactId ?? null,
@@ -507,6 +674,19 @@ Deno.serve(async (req) => {
         if (!transactionId) return json({ ok: false, error: "transactionId required" }, 400);
         const readAt = await markRead(transactionId);
         return json({ ok: true, result: { readAt } });
+      }
+      case "mintSellerLink": {
+        // Team action: get (or create) the secure reply link for a seller contact.
+        const transactionId = String(args.transactionId ?? "");
+        const email = String(args.email ?? "");
+        if (!transactionId || !email) return json({ ok: false, error: "transactionId and email required" }, 400);
+        const token = await ensureSellerToken(
+          transactionId,
+          typeof args.contactId === "string" ? args.contactId : null,
+          typeof args.name === "string" ? args.name : "Seller",
+          email,
+        );
+        return json({ ok: true, result: { token, url: sellerReplyLink(token) } });
       }
       case "sendMail": {
         // Compose + send (or queue) one email, logging it to communications.
