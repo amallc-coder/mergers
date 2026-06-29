@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Filter, Search } from "lucide-react";
+import { Bell, Filter, Search } from "lucide-react";
 import { StatusChip, ReviewStatusChip, TimelineBadge } from "@/components/ui";
 import { CATEGORY_META, CATEGORY_ORDER } from "@/lib/domain/diligence-template";
 import { DILIGENCE_STATUSES } from "@/lib/domain/types";
@@ -16,13 +16,31 @@ export function DiligenceTracker({
   nowIso,
   reviewerNames,
   contactNames,
+  onRemind,
 }: {
   items: DiligenceRequestItem[];
   nowIso: string;
   reviewerNames: Record<string, string>;
   contactNames: Record<string, string>;
+  /** Live-only: email the seller a reminder for one overdue item. */
+  onRemind?: (item: DiligenceRequestItem) => Promise<void>;
 }) {
   const now = new Date(nowIso).getTime();
+  const [remindBusy, setRemindBusy] = useState<string | null>(null);
+  const [remindDone, setRemindDone] = useState<Set<string>>(new Set());
+
+  async function doRemind(item: DiligenceRequestItem) {
+    if (!onRemind) return;
+    setRemindBusy(item.id);
+    try {
+      await onRemind(item);
+      setRemindDone((s) => new Set(s).add(item.id));
+    } catch {
+      /* surfaced upstream */
+    } finally {
+      setRemindBusy(null);
+    }
+  }
   const [timeline, setTimeline] = useState<"all" | "Pre Signing" | "Post Signing">("all");
   const [category, setCategory] = useState<"all" | CategoryKey>("all");
   const [status, setStatus] = useState<"all" | string>("all");
@@ -173,8 +191,23 @@ export function DiligenceTracker({
                     <ReviewStatusChip status={i.internalReviewStatus} />
                   </td>
                   <td className={cn("px-3 py-2.5 text-xs", overdue ? "font-semibold text-rust-600" : "text-ink-500")}>
-                    {i.dueDate ? formatDate(i.dueDate) : "—"}
-                    {overdue ? " · overdue" : ""}
+                    <div className="flex items-center gap-2">
+                      <span>
+                        {i.dueDate ? formatDate(i.dueDate) : "—"}
+                        {overdue ? " · overdue" : ""}
+                      </span>
+                      {overdue && onRemind && (
+                        <button
+                          onClick={() => void doRemind(i)}
+                          disabled={remindBusy === i.id || remindDone.has(i.id)}
+                          title="Email the seller a reminder for this item"
+                          className="inline-flex items-center gap-1 rounded-md border border-ink-200 px-1.5 py-0.5 text-[10px] font-medium text-ink-600 hover:bg-ink-50 disabled:opacity-60"
+                        >
+                          <Bell size={11} />
+                          {remindDone.has(i.id) ? "Sent" : remindBusy === i.id ? "…" : "Remind"}
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2.5 text-xs text-ink-600">
                     {i.assignedInternalReviewerId ? reviewerNames[i.assignedInternalReviewerId] ?? "—" : "—"}
