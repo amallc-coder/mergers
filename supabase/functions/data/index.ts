@@ -31,6 +31,11 @@ const AZURE_TENANT = Deno.env.get("AZURE_TENANT_ID") ?? "";
 const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID") ?? "";
 const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET") ?? "";
 const SENDER_MAILBOX = Deno.env.get("GRAPH_SENDER_MAILBOX") ?? "";
+// Delegated (ROPC) sign-in for the sender mailbox: when a login + password are
+// configured we authenticate AS this user and send on its behalf, so email works
+// without an application Mail.Send grant. Credentials come from env (never committed).
+const SENDER_USER = Deno.env.get("GRAPH_SENDER_USER") ?? "";
+const SENDER_PASSWORD = Deno.env.get("GRAPH_SENDER_PASSWORD") ?? "";
 
 const APP_KEY_SHA256 =
   Deno.env.get("APP_ACCESS_KEY_SHA256") ??
@@ -162,6 +167,26 @@ async function graphToken(): Promise<string> {
   return (await res.json()).access_token as string;
 }
 
+/** Delegated (ROPC) token — sign in AS the sender mailbox using its login, so we can
+ *  send on its behalf with only a delegated Mail.Send grant (no application permission). */
+async function delegatedToken(): Promise<string> {
+  const body = new URLSearchParams({
+    client_id: AZURE_CLIENT_ID,
+    client_secret: AZURE_CLIENT_SECRET,
+    grant_type: "password",
+    username: SENDER_USER,
+    password: SENDER_PASSWORD,
+    scope: "https://graph.microsoft.com/Mail.Send",
+  });
+  const res = await fetch(`https://login.microsoftonline.com/${AZURE_TENANT}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!res.ok) throw new Error(`delegated token ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return (await res.json()).access_token as string;
+}
+
 /**
  * Attempt to deliver one email via Graph sendMail. Returns the resulting status:
  * - "sent"   on success
@@ -176,12 +201,18 @@ async function deliverEmail(
   subject: string,
   body: string,
 ): Promise<{ status: "sent" | "queued" | "failed"; error: string | null }> {
-  if (!SENDER_MAILBOX) return { status: "queued", error: "Sender mailbox not configured yet." };
+  // Prefer the delegated login (sign in AS the mailbox) when credentials are set;
+  // otherwise fall back to app-only send from the configured sender mailbox.
+  const useDelegated = !!(SENDER_USER && SENDER_PASSWORD);
+  if (!useDelegated && !SENDER_MAILBOX) return { status: "queued", error: "Sender mailbox not configured yet." };
   if (!toEmail) return { status: "failed", error: "No recipient address." };
   try {
-    const t = token ?? (await graphToken());
+    const t = useDelegated ? await delegatedToken() : (token ?? (await graphToken()));
+    const endpoint = useDelegated
+      ? `https://graph.microsoft.com/v1.0/me/sendMail`
+      : `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SENDER_MAILBOX)}/sendMail`;
     const res = await fetch(
-      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SENDER_MAILBOX)}/sendMail`,
+      endpoint,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
