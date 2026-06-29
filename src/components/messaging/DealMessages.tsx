@@ -5,8 +5,9 @@
  *  Used both in the Inbox and on the transaction detail. */
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Send, Sparkles } from "lucide-react";
+import { AlertTriangle, Link2, Send, Sparkles } from "lucide-react";
 import { useData } from "@/lib/data/DataProvider";
+import { dataApi } from "@/lib/data/snapshot-client";
 import { detectKpiAnomalies, type KpiAnomaly } from "@/lib/domain/analytics";
 import type { ExtractedMetric } from "@/lib/domain/types";
 import { formatDateTime } from "@/lib/format";
@@ -19,6 +20,7 @@ export function DealMessages({ transactionId, practiceName }: { transactionId: s
   const [toSeller, setToSeller] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
 
   useEffect(() => {
     let c = false;
@@ -65,6 +67,30 @@ export function DealMessages({ transactionId, practiceName }: { transactionId: s
       });
       setDraft("");
     });
+  }
+
+  // Generate the seller's secure reply link and copy it to the clipboard, so the
+  // team can share it directly (clarification emails also embed it automatically).
+  async function copySellerLink() {
+    if (!seller?.email) return;
+    setErr(null);
+    setLinkNote(null);
+    setBusy(true);
+    try {
+      const { url } = await dataApi.mintSellerLink({
+        transactionId, email: seller.email, name: seller.name, contactId: seller.id,
+      });
+      if (!url) {
+        setLinkNote("Portal link unavailable — set PORTAL_BASE_URL on the data function.");
+        return;
+      }
+      try { await navigator.clipboard.writeText(url); setLinkNote("Reply link copied to clipboard."); }
+      catch { setLinkNote(url); }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function raise(a: KpiAnomaly) {
@@ -152,14 +178,27 @@ export function DealMessages({ transactionId, practiceName }: { transactionId: s
               <input type="checkbox" checked={toSeller} onChange={(e) => setToSeller(e.target.checked)} />
               Send to seller{toSeller && !seller?.email ? " (no email on file — will queue)" : ""}
             </label>
-            <button
-              onClick={() => void send()}
-              disabled={busy || draft.trim().length === 0}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-ink-900 px-3 py-1.5 text-xs font-medium text-paper hover:bg-ink-800 disabled:opacity-50"
-            >
-              <Send size={13} /> {toSeller ? "Send" : "Add note"}
-            </button>
+            <div className="flex items-center gap-2">
+              {seller?.email && (
+                <button
+                  onClick={() => void copySellerLink()}
+                  disabled={busy}
+                  title="Copy the seller's secure reply link"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-ink-200 px-2.5 py-1.5 text-xs font-medium text-ink-600 hover:bg-ink-50 disabled:opacity-50"
+                >
+                  <Link2 size={13} /> Reply link
+                </button>
+              )}
+              <button
+                onClick={() => void send()}
+                disabled={busy || draft.trim().length === 0}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-ink-900 px-3 py-1.5 text-xs font-medium text-paper hover:bg-ink-800 disabled:opacity-50"
+              >
+                <Send size={13} /> {toSeller ? "Send" : "Add note"}
+              </button>
+            </div>
           </div>
+          {linkNote && <p className="mt-1 px-1 text-[11px] text-brand-600">{linkNote}</p>}
         </div>
       ) : (
         <p className="text-xs text-ink-400">Unlock the live backend to message the seller.</p>
