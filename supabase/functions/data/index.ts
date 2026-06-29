@@ -335,6 +335,50 @@ function withReplyFooter(html: string, link: string): string {
   );
 }
 
+/** Create a calendar event on the sender mailbox via Graph (delegated). Sends
+ *  invites to the attendees and, when requested, provisions a Teams join link.
+ *  Best-effort: returns null (rather than throwing) when delegated creds are
+ *  absent or Graph rejects the call, so the meeting is still recorded locally. */
+async function graphCreateEvent(input: {
+  subject: string;
+  bodyHtml: string;
+  startISO: string;
+  endISO: string;
+  attendees: { email: string; name?: string }[];
+  location?: string;
+  online?: boolean;
+}): Promise<{ eventId: string; joinUrl: string | null } | null> {
+  if (!SENDER_USER || !SENDER_PASSWORD) return null;
+  try {
+    const token = await delegatedToken();
+    const payload: Record<string, unknown> = {
+      subject: input.subject,
+      body: { contentType: "HTML", content: input.bodyHtml },
+      start: { dateTime: input.startISO, timeZone: "UTC" },
+      end: { dateTime: input.endISO, timeZone: "UTC" },
+      attendees: input.attendees
+        .filter((a) => a.email)
+        .map((a) => ({ emailAddress: { address: a.email, name: a.name }, type: "required" })),
+    };
+    if (input.location) payload.location = { displayName: input.location };
+    if (input.online) {
+      payload.isOnlineMeeting = true;
+      payload.onlineMeetingProvider = "teamsForBusiness";
+    }
+    const res = await fetch("https://graph.microsoft.com/v1.0/me/events", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return null;
+    const ev = await res.json();
+    const joinUrl = (ev.onlineMeeting && ev.onlineMeeting.joinUrl) || ev.onlineMeetingUrl || null;
+    return { eventId: String(ev.id ?? ""), joinUrl: joinUrl ? String(joinUrl) : null };
+  } catch {
+    return null;
+  }
+}
+
 /** Mark all unread messages on a transaction as read (newest-first inbox view). */
 async function markRead(transactionId: string): Promise<string> {
   const now = new Date().toISOString();
@@ -687,6 +731,59 @@ Deno.serve(async (req) => {
           email,
         );
         return json({ ok: true, result: { token, url: sellerReplyLink(token) } });
+      }
+      case "scheduleMeeting": {
+        // Create a diligence meeting: send Outlook invites (delegated Graph) and
+        // record it so it shows on the calendar/dashboard. Graph is best-effort —
+        // the meeting is always stored even if invites can't be sent yet.
+        const transactionId = String(args.transactionId ?? "");
+        const title = String(args.title ?? "").trim();
+        const startISO = String(args.start ?? "");
+        const endISO = String(args.end ?? "");
+        if (!transactionId || !title || !startISO || !endISO) {
+          return json({ ok: false, error: "transactionId, title, start and end required" }, 400);
+        }
+        const type = typeof args.type === "string" ? args.type : "Other";
+        const location = typeof args.location === "string" ? args.location : undefined;
+        const online = args.online === true;
+        const agenda = Array.isArray(args.agenda) ? args.agenda.map(String) : [];
+        const attendees = Array.isArray(args.attendeeEmails)
+          ? (args.attendeeEmails as unknown[]).map((e) => ({ email: String(e) }))
+          : [];
+        const actorName = typeof args.actorName === "string" ? args.actorName : "Deal team";
+        const bodyHtml =
+          (typeof args.body === "string" && args.body ? `<p>${args.body}</p>` : "") +
+          (agenda.length ? `<p><b>Agenda</b></p><ul>${agenda.map((a) => `<li>${a}</li>`).join("")}</ul>` : "");
+
+        const ev = await graphCreateEvent({
+          subject: title, bodyHtml, startISO, endISO, attendees, location, online,
+        });
+
+        const rows = (await upsert("meetings", {
+          transaction_id: transactionId,
+          type,
+          title,
+          starts_at: startISO,
+          ends_at: endISO,
+          attendee_contact_ids: Array.isArray(args.attendeeContactIds) ? args.attendeeContactIds : [],
+          agenda,
+          outlook_event_id: ev?.eventId || null,
+          location: location ?? null,
+          online_meeting_url: ev?.joinUrl ?? null,
+        })) as Record<string, unknown>[];
+        const meeting = Array.isArray(rows) ? rows[0] : rows;
+
+        await insertRow("activity_events", {
+          transaction_id: transactionId,
+          type: "meeting_scheduled",
+          actor_name: actorName,
+          summary: `Meeting scheduled: ${title}`,
+          detail: `${startISO}${ev ? "" : " (invite not sent — Outlook unavailable)"}`,
+        });
+        return json({
+          ok: true,
+          result: { meeting, invited: !!ev, joinUrl: ev?.joinUrl ?? null },
+        });
       }
       case "sendMail": {
         // Compose + send (or queue) one email, logging it to communications.

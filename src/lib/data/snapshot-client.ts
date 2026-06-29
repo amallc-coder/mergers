@@ -125,4 +125,18 @@ export const dataApi = {
     call<{ readAt: string }>("markMessagesRead", { transactionId }),
   mintSellerLink: (input: { transactionId: string; email: string; name?: string; contactId?: string }) =>
     call<{ token: string; url: string }>("mintSellerLink", input),
+  scheduleMeeting: (input: {
+    transactionId: string;
+    title: string;
+    start: string;
+    end: string;
+    type?: string;
+    location?: string;
+    online?: boolean;
+    body?: string;
+    agenda?: string[];
+    attendeeEmails?: string[];
+    attendeeContactIds?: string[];
+    actorName?: string;
+  }) => call<{ meeting: unknown; invited: boolean; joinUrl: string | null }>("scheduleMeeting", input),
 };
