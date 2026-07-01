@@ -24,7 +24,7 @@ import type { DiligenceRepository } from "./repository";
 import { seedSnapshot } from "./seed-snapshot";
 import { snapshotRepository, type Snapshot } from "./snapshot";
 import { dataApi, isLiveBackend } from "./snapshot-client";
-import { hasAppKey, sharePoint, INTAKE_HOME } from "../sharepoint/client";
+import { hasAppKey, setAppKey, sharePoint, INTAKE_HOME } from "../sharepoint/client";
 import {
   DEFAULT_PIPELINE_STAGES,
   type AlertRoute,
@@ -52,7 +52,7 @@ export interface CreateResult {
   provisioningError?: string;
 }
 
-type Source = "seed" | "live";
+type Source = "seed" | "live" | "locked";
 // "loading" = first live fetch (blank + spinner). "refreshing" = a background
 // refetch while real data stays on screen. "error" = a live fetch failed; we
 // never substitute seed data, so the UI shows an error/retry, not fake figures.
@@ -179,7 +179,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
-    if (!liveConfigured || !hasAppKey()) {
+    if (!liveConfigured) {
+      // No backend configured (local dev / offline demo build): serve the seed
+      // sample data so the app is explorable. This is the ONLY path that shows
+      // demo data — a configured production build never falls back to it.
       setSource("seed");
       setRepo(seedRepo);
       setPipelineStages(seedSnap.pipelineStages ?? DEFAULT_PIPELINE_STAGES);
@@ -189,6 +192,23 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setMessages(seedSnap.messages ?? []);
       setAlertRouting(seedSnap.alertRouting ?? []);
       setStatus("idle");
+      return;
+    }
+    if (!hasAppKey()) {
+      // Live backend IS configured but locked (no passcode yet — e.g. right after a
+      // cache clear wipes localStorage). The database is the source of truth here, so
+      // we show an empty, LOCKED state and prompt for the passcode — never the demo
+      // data. Entering the passcode (at sign-in or via the banner) unlocks it.
+      setSource("locked");
+      setRepo(emptyRepo);
+      setPipelineStages(DEFAULT_PIPELINE_STAGES);
+      setPeople([]);
+      setContactLinks([]);
+      setCommunications([]);
+      setMessages([]);
+      setAlertRouting([]);
+      setStatus("idle");
+      loadedLiveRef.current = false;
       return;
     }
     let cancelled = false;
@@ -401,6 +421,42 @@ export function useData(): DataContextValue {
  */
 export function LiveDataBanner() {
   const { status, error, source, refresh } = useData();
+  const [passcode, setPasscode] = useState("");
+
+  // Locked: live backend configured but no passcode (e.g. after a cache clear).
+  // Offer an inline unlock so the user never has to hunt for where to re-enter it,
+  // and never sees demo data in its place.
+  if (source === "locked") {
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!passcode.trim()) return;
+          setAppKey(passcode.trim());
+          setPasscode("");
+          refresh();
+        }}
+        className="flex flex-wrap items-center gap-2 border-b border-ochre-200 bg-ochre-50 px-4 py-2 text-sm text-ochre-700 sm:px-6 lg:px-8"
+      >
+        <span className="min-w-0 flex-1">Enter your access passcode to load live data.</span>
+        <input
+          type="password"
+          value={passcode}
+          onChange={(e) => setPasscode(e.target.value)}
+          placeholder="Access passcode"
+          className="w-44 rounded-md border border-ochre-300 bg-panel px-2 py-1 text-xs outline-none focus:border-ochre-500"
+        />
+        <button
+          type="submit"
+          disabled={!passcode.trim()}
+          className="shrink-0 rounded-md bg-ink-900 px-2.5 py-1 text-xs font-medium text-paper hover:bg-ink-800 disabled:opacity-50"
+        >
+          Unlock
+        </button>
+      </form>
+    );
+  }
+
   if (status !== "error") return null;
   return (
     <div
